@@ -54,6 +54,9 @@ test("keeps the compatibility byte API and rejects non-success responses", async
     contentType: "image/png",
   });
   await expect(
-    downloadObsMessageResponse({ ...deps, fetch: async () => new Response(null, { status: 404 }) }, "missing"),
+    downloadObsMessageResponse(
+      { ...deps, fetch: async () => new Response(null, { status: 404 }) },
+      "missing",
+    ),
   ).rejects.toThrow("OBS download failed: HTTP 404");
 });
