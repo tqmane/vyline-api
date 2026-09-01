@@ -85,6 +85,10 @@ export declare class TalkService implements BaseService {
     getSettings(...param: Parameters<typeof LINEStruct.getSettings_args>): Promise<LINETypes.getSettings_result["success"]>;
     sendChatChecked(...param: Parameters<typeof LINEStruct.sendChatChecked_args>): Promise<void>;
     unsendMessage(...param: Parameters<typeof LINEStruct.unsendMessage_args>): Promise<void>;
+    silentlyUnsendMessage(options: {
+        messageId: string;
+        reqSeq?: number;
+    }): Promise<LINETypes.SilentlyUnsendMessageResponse>;
     deleteOtherFromChat(...param: Parameters<typeof LINEStruct.deleteOtherFromChat_args>): Promise<LINETypes.deleteOtherFromChat_result["success"]>;
     inviteIntoChat(options: {
         chatMid: string;

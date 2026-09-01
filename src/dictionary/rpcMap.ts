@@ -113,6 +113,17 @@ export const RPC_DICTIONARY: readonly RpcEntry[] = [
     category: "talk",
   },
   {
+    canonicalName: "silentlyUnsendMessage",
+    desktopEvidence: [],
+    path: "/S4",
+    stackApi: "base.talk.silentlyUnsendMessage",
+    domainApi: "session.talk.unsendSilently",
+    backendApi: "silentlyUnsendMessage",
+    category: "talk",
+    notes:
+      "Android 26.13.0 JADX: SilentlyUnsendMessageRequest/Response。Desktop 由来の証拠ではない",
+  },
+  {
     canonicalName: "getPreviousMessagesV2WithRequest",
     desktopEvidence: ["TalkService_getPreviousMessagesV2WithRequest_pargs"],
     path: "/S4",

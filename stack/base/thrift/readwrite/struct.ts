@@ -3912,6 +3912,16 @@ export function Pb1_EnumC13221w3(
 ): (LINETypes.Pb1_EnumC13221w3 & number) | undefined {
   return typeof param === "string" ? LINETypes.enums.Pb1_EnumC13221w3[param] : param;
 }
+export function SilentlyUnsendMessageRequest(
+  param?: PartialDeep<LINETypes.SilentlyUnsendMessageRequest> | undefined,
+): NestedArray {
+  return typeof param === "undefined"
+    ? []
+    : [
+        [8, 1, param.reqSeq],
+        [11, 2, param.messageId],
+      ];
+}
 export function SimCard(param?: PartialDeep<LINETypes.SimCard> | undefined): NestedArray {
   return typeof param === "undefined"
     ? []
@@ -9056,6 +9066,13 @@ export function setPassword_args(
   param?: PartialDeep<LINETypes.setPassword_args> | undefined,
 ): NestedArray {
   return typeof param === "undefined" ? [] : [[12, 1, SetPasswordRequest(param.request)]];
+}
+export function silentlyUnsendMessage_args(
+  param?: PartialDeep<LINETypes.silentlyUnsendMessage_args> | undefined,
+): NestedArray {
+  return typeof param === "undefined"
+    ? []
+    : [[12, 1, SilentlyUnsendMessageRequest(param.silentlyUnsendMessageRequest)]];
 }
 export function shouldShowWelcomeStickerBanner_args(
   param?: PartialDeep<LINETypes.shouldShowWelcomeStickerBanner_args> | undefined,

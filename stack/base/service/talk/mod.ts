@@ -373,6 +373,24 @@ export class TalkService implements BaseService {
     );
   }
 
+  async silentlyUnsendMessage(options: {
+    messageId: string;
+    reqSeq?: number;
+  }): Promise<LINETypes.SilentlyUnsendMessageResponse> {
+    return await this.client.request.request(
+      LINEStruct.silentlyUnsendMessage_args({
+        silentlyUnsendMessageRequest: {
+          reqSeq: options.reqSeq ?? (await this.client.getReqseq()),
+          messageId: options.messageId,
+        },
+      }),
+      "silentlyUnsendMessage",
+      this.protocolType,
+      true,
+      "/S4",
+    );
+  }
+
   async deleteOtherFromChat(
     ...param: Parameters<typeof LINEStruct.deleteOtherFromChat_args>
   ): Promise<LINETypes.deleteOtherFromChat_result["success"]> {

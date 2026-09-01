@@ -453,6 +453,7 @@ export declare function GetContactCalendarEventsRequest(param?: PartialDeep<LINE
 export declare function GetContactV3Target(param?: PartialDeep<LINETypes.GetContactV3Target> | undefined): NestedArray;
 export declare function GetContactsV3Request(param?: PartialDeep<LINETypes.GetContactsV3Request> | undefined): NestedArray;
 export declare function Pb1_EnumC13221w3(param: LINETypes.Pb1_EnumC13221w3 | undefined): (LINETypes.Pb1_EnumC13221w3 & number) | undefined;
+export declare function SilentlyUnsendMessageRequest(param?: PartialDeep<LINETypes.SilentlyUnsendMessageRequest> | undefined): NestedArray;
 export declare function SimCard(param?: PartialDeep<LINETypes.SimCard> | undefined): NestedArray;
 export declare function fN0_C24473e(param?: PartialDeep<LINETypes.fN0_C24473e> | undefined): NestedArray;
 export declare function DestinationLIFFRequest(param?: PartialDeep<LINETypes.DestinationLIFFRequest> | undefined): NestedArray;
@@ -1176,6 +1177,7 @@ export declare function setHashedPassword_args(param?: PartialDeep<LINETypes.set
 export declare function setIdentifier_args(param?: PartialDeep<LINETypes.setIdentifier_args> | undefined): NestedArray;
 export declare function setNotificationsEnabled_args(param?: PartialDeep<LINETypes.setNotificationsEnabled_args> | undefined): NestedArray;
 export declare function setPassword_args(param?: PartialDeep<LINETypes.setPassword_args> | undefined): NestedArray;
+export declare function silentlyUnsendMessage_args(param?: PartialDeep<LINETypes.silentlyUnsendMessage_args> | undefined): NestedArray;
 export declare function shouldShowWelcomeStickerBanner_args(param?: PartialDeep<LINETypes.shouldShowWelcomeStickerBanner_args> | undefined): NestedArray;
 export declare function startPhotobooth_args(param?: PartialDeep<LINETypes.startPhotobooth_args> | undefined): NestedArray;
 export declare function startUpdateVerification_args(param?: PartialDeep<LINETypes.startUpdateVerification_args> | undefined): NestedArray;
