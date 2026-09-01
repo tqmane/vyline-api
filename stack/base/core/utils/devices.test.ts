@@ -1,7 +1,8 @@
 import { assertEquals } from "@vyline/protocol/stack/assert";
+import { test } from "bun:test";
 import { getDeviceDetails } from "./devices.ts";
 
-Deno.test("getDeviceDetails returns current default app profiles", () => {
+test("getDeviceDetails returns current default app profiles", () => {
   assertEquals(getDeviceDetails("DESKTOPWIN"), {
     device: "DESKTOPWIN",
     appVersion: "9.7.0.3556",
@@ -28,15 +29,15 @@ Deno.test("getDeviceDetails returns current default app profiles", () => {
   });
   assertEquals(getDeviceDetails("IOS"), {
     device: "IOS",
-    appVersion: "26.7.2",
+    appVersion: "26.12.1",
     systemName: "iOS",
-    systemVersion: "18.0",
+    systemVersion: "26.1",
   });
   assertEquals(getDeviceDetails("IOSIPAD"), {
     device: "IOSIPAD",
-    appVersion: "26.7.2",
+    appVersion: "26.12.1",
     systemName: "iOS",
-    systemVersion: "18.0",
+    systemVersion: "26.1",
   });
   assertEquals(getDeviceDetails("WATCHOS"), {
     device: "WATCHOS",
@@ -52,6 +53,6 @@ Deno.test("getDeviceDetails returns current default app profiles", () => {
   });
 });
 
-Deno.test("getDeviceDetails keeps explicit version overrides", () => {
+test("getDeviceDetails keeps explicit version overrides", () => {
   assertEquals(getDeviceDetails("IOSIPAD", "15.19.0")?.appVersion, "15.19.0");
 });
