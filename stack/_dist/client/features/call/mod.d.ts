@@ -4,6 +4,7 @@ import type { DeviceDetails } from "../../../base/mod.ts";
 import type { CodecFactory } from "./audio.js";
 import { CallSession, type CallSessionOpts } from "./session.js";
 export type { CallSession, CallSessionEvents, CallSessionOpts, CallSessionState, CallTransport, } from "./session.js";
+export { type IncomingCallRoutePayload, type IncomingVoipPushType, parseIncomingCallRoutePayload, toAndromedaCallRoute, } from "./incoming.js";
 export { type AudioDecoder, type AudioEncoder, type AudioSink, type AudioSource, bufferSink, bufferSource, type CodecFactory, decodeWavSync, defaultCodecFactory, type FileDecoder, type NativeGroupOpusPacketizeOptions, packetizeNativeGroupOpusPairs, type PcmFrame, resampleLinear, streamSink, streamSource, } from "./audio.js";
 export { stubTransport } from "./session.js";
 export { AndromedaTransport, type AndromedaTransportOpts } from "./andromeda.js";
@@ -41,9 +42,7 @@ export interface CallClient {
 }
 export declare function createCallClient(client: Client): CallClient;
 export interface IncomingCallEvent {
-    callMid: string;
-    from: string;
-    kind?: string;
+    chatId: string;
     raw: LINETypes.Operation;
 }
 export interface CancelCallEvent {
