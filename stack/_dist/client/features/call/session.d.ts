@@ -30,6 +30,8 @@ export interface CallTransport {
     waitForAnswer?(opts?: {
         to: string;
     }): Promise<unknown>;
+    /** Optional incoming-call signaling path. */
+    answer?(): Promise<unknown>;
 }
 export declare const stubTransport: CallTransport;
 export type CallSessionEvents = {
@@ -46,6 +48,7 @@ export declare class CallSession extends TypedEventEmitter<CallSessionEvents> {
     get peer(): string;
     get kind(): CallKind;
     start(): Promise<LINETypes.CallRoute>;
+    answer(): Promise<LINETypes.CallRoute>;
     sendStream(source: AudioSource, opts?: {
         signal?: AbortSignal;
     }): Promise<void>;

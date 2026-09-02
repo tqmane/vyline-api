@@ -45,6 +45,10 @@ export interface CallTransport {
   /** Optional. PLANET-style transports may enter ringing after INVITE and
    *  only become media-ready after the peer sends CONN_REQ. */
   waitForAnswer?(opts?: { to: string }): Promise<unknown>;
+  /** Optional incoming-call signaling path. Andromeda waits for INVITE and
+   *  sends the SIP answer; transports without evidence-backed incoming
+   *  signaling deliberately leave this undefined. */
+  answer?(): Promise<unknown>;
 }
 
 export const stubTransport: CallTransport = {
@@ -109,6 +113,13 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
     this.emit("state", s, prev);
   }
 
+  #fail(e: unknown): Error {
+    this.#setState("failed");
+    const err = e instanceof Error ? e : new Error(String(e));
+    this.emit("error", err);
+    return err;
+  }
+
   async start(): Promise<LINETypes.CallRoute> {
     if (this.#route) return this.#route;
     this.#setState("acquiring");
@@ -133,10 +144,34 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
       this.emit("connected", this.#route);
       return this.#route;
     } catch (e) {
-      this.#setState("failed");
-      const err = e instanceof Error ? e : new Error(String(e));
-      this.emit("error", err);
-      throw err;
+      throw this.#fail(e);
+    }
+  }
+
+  /**
+   * Answer an incoming call using a route delivered by the VoIP push path.
+   * This never calls acquireCallRoute: doing so would create an outgoing route
+   * and is not equivalent to LINE's incoming-call flow.
+   */
+  async answer(): Promise<LINETypes.CallRoute> {
+    if (this.#state === "in-call" && this.#route) return this.#route;
+    const route = this.#opts.preacquiredRoute;
+    if (!route) throw this.#fail(new Error("answer: incoming VoIP route not configured"));
+    if (!this.#transport.answer) {
+      throw this.#fail(new Error("answer: transport does not support incoming calls"));
+    }
+
+    this.#route = route;
+    this.#setState("connecting");
+    try {
+      await this.#transport.connect({ route });
+      this.#setState("ringing");
+      await this.#transport.answer();
+      this.#setState("in-call");
+      this.emit("connected", route);
+      return route;
+    } catch (e) {
+      throw this.#fail(e);
     }
   }
 

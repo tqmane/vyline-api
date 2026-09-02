@@ -97,16 +97,16 @@ Deno.test("call.getGroupCall + URL CRUD route to right base methods", async () =
   assertEquals((calls[1].args[0] as { groupCallUrlTicket: string }).groupCallUrlTicket, "ticket-1");
 });
 
-Deno.test("parseIncomingCall pulls callMid/from/kind out of Operation params", () => {
+Deno.test("parseIncomingCall only trusts param1 as the VoIP chat signal", () => {
   const e = parseIncomingCall({
-    param1: "ccall-1",
-    param2: "u-caller",
+    param1: "c-chat-1",
+    param2: "u-not-a-proven-caller",
     param3: "VIDEO",
     type: "NOTIFIED_RECEIVED_CALL",
   } as never);
-  assertEquals(e.callMid, "ccall-1");
-  assertEquals(e.from, "u-caller");
-  assertEquals(e.kind, "VIDEO");
+  assertEquals(e.chatId, "c-chat-1");
+  assertEquals("from" in e, false);
+  assertEquals("kind" in e, false);
 });
 
 Deno.test("parseCancelCall pulls fields out of CANCEL_CALL op", () => {
@@ -121,12 +121,8 @@ Deno.test("parseCancelCall pulls fields out of CANCEL_CALL op", () => {
   assertEquals(e.reason, "DECLINED");
 });
 
-Deno.test("parseIncomingCall handles missing param2/param3", () => {
-  const e = parseIncomingCall({
-    param1: "ccall-1",
-    type: "NOTIFIED_RECEIVED_CALL",
-  } as never);
-  assertEquals(e.callMid, "ccall-1");
-  assertEquals(e.from, "");
-  assertEquals(e.kind, undefined);
+Deno.test("parseIncomingCall handles missing param1 without fabricating metadata", () => {
+  const e = parseIncomingCall({ type: "NOTIFIED_RECEIVED_CALL" } as never);
+  assertEquals(e.chatId, "");
+  assertEquals(Object.keys(e).sort(), ["chatId", "raw"]);
 });
