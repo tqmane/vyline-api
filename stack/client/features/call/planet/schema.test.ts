@@ -8,6 +8,7 @@ import {
   decodeCcParticipateRsp,
   decodeCcRelReq,
   decodeCcSetupRsp,
+  decodeCcVerifyRsp,
   decodeFields,
   decodeMcDataReq,
   decodeMcDataRsp,
@@ -24,6 +25,8 @@ import {
   packCcRelReq,
   packCcSetupReq,
   packCcSetupRsp,
+  packCcVerifyReq,
+  packCcVerifyRsp,
   packKeepaliveReq,
   packMcDataReq,
   packMcDataRsp,
@@ -698,6 +701,66 @@ Deno.test("packCcConnReq/packCcConnRsp round-trip answered-call media fields", (
   assertEquals(decodedRsp.netType, 1);
   assertEquals(decodedRsp.unavailToSec, 120);
   assertEquals(decodedRsp.ua, ua);
+});
+
+Deno.test("cc_verify_req/rsp use native Android field tags", () => {
+  const ua = packPlanetUserAgent({ osName: "Android", osVersion: "36", deviceName: "Pixel" });
+  const credential = new Uint8Array([1, 2, 3, 4]);
+  const req = packCcVerifyReq({
+    initiator: "u-caller",
+    responder: "u-local",
+    iZone: "JP",
+    rZone: "JP",
+    ua,
+    devId: "device",
+    commTypeFlags: 1,
+    capas: [1, 2, 7],
+    credential,
+    svcKey: "freecall.audio",
+    crt: false,
+    netType: 1,
+    stid: "stid",
+    svcId: "svc",
+    tgtSvcId: "target",
+    pathCheck: false,
+    interDomain: false,
+  });
+  assertEquals(
+    decodeFields(req).map((field) => field.tag),
+    [1, 2, 3, 4, 5, 6, 7, 8, 8, 8, 9, 10, 11, 12, 21, 51, 52, 105, 153],
+  );
+
+  const offer = new Uint8Array([9, 8, 7]);
+  const feature = new Uint8Array([0x08, 0x01]);
+  const rsp = packCcVerifyRsp({
+    result: 0,
+    relCode: 0,
+    relPhrase: "OK",
+    cfgs: "{}",
+    oCapas: [1, 7],
+    offer,
+    releaser: "",
+    compCfgs: new Uint8Array([5]),
+    compCfgsType: 1,
+    oUeData: new Uint8Array([6]),
+    oUeDataCompType: 2,
+    oFeatures: [feature],
+    iCountry: "JP",
+    iDevId: "peer-device",
+    aliveRptInterval: 30,
+    stops: "",
+    pt: false,
+    maxCallTimeSec: 3600,
+  });
+  const decoded = decodeCcVerifyRsp(rsp);
+  assertEquals(decoded.result, 0);
+  assertEquals(decoded.offer, offer);
+  assertEquals(decoded.oCapas, [1, 7]);
+  assertEquals(decoded.oFeatures, [feature]);
+  assertEquals(decoded.iCountry, "JP");
+  assertEquals(decoded.iDevId, "peer-device");
+  assertEquals(decoded.aliveRptInterval, 30);
+  assertEquals(decoded.maxCallTimeSec, 3600);
 });
 
 Deno.test("packCcInfoReq/packCcInfoRsp round-trip info exchange fields", () => {

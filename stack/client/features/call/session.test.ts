@@ -107,6 +107,39 @@ Deno.test("CallSession.start is idempotent", async () => {
   assertEquals(r1, r2);
 });
 
+Deno.test("CallSession.start answers an incoming call without acquiring or inviting", async () => {
+  const { client, acquired, fakeRoute } = fakeClient();
+  let answered = 0;
+  let invited = 0;
+  const transport: CallTransport = {
+    ...recordingTransport(),
+    invite() {
+      invited++;
+      return Promise.resolve();
+    },
+    answer() {
+      answered++;
+      return Promise.resolve();
+    },
+  };
+  const session = new CallSession(client, {
+    to: "u-caller",
+    kind: "AUDIO",
+    direction: "incoming",
+    preacquiredRoute: fakeRoute as never,
+    transport,
+  });
+  const states: string[] = [];
+  session.on("state", (state) => states.push(state));
+
+  await session.start();
+
+  assertEquals(acquired.length, 0);
+  assertEquals(invited, 0);
+  assertEquals(answered, 1);
+  assertEquals(states, ["acquiring", "connecting", "ringing", "in-call"]);
+});
+
 Deno.test("CallSession.sendStream pumps PCM through codec → transport", async () => {
   const { client } = fakeClient();
   const transport = recordingTransport();

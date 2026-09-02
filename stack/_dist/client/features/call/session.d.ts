@@ -7,6 +7,7 @@ export type CallKind = "AUDIO" | "VIDEO" | "FACEPLAY";
 export interface CallSessionOpts {
     to: string;
     kind?: CallKind;
+    direction?: "outgoing" | "incoming";
     fromEnvInfo?: Record<string, string>;
     codecs?: CodecFactory;
     transport?: CallTransport;
@@ -25,6 +26,9 @@ export interface CallTransport {
     invite?(opts: {
         to: string;
     }): Promise<unknown>;
+    /** Optional. Incoming-call transports complete their callee-side signaling
+     *  after connect() using the route delivered by NOTIFIED_RECEIVED_CALL. */
+    answer?(): Promise<unknown>;
     /** Optional. PLANET-style transports may enter ringing after INVITE and
      *  only become media-ready after the peer sends CONN_REQ. */
     waitForAnswer?(opts?: {

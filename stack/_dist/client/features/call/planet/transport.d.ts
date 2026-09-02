@@ -16,9 +16,11 @@
 import type * as LINETypes from "@vyline/line-types";
 import type { CallTransport } from "../session.ts";
 import { type EphemeralKeypair } from "./crypto.js";
-import { type CcConnReq, decodeCcParticipateRsp, decodeCcSetupRsp, decodePlanetMsg, type NativeSetupOffer, type PlanetSetupOfferMaterial, type PlanetUserAgent } from "./schema.js";
+import { type CcConnReq, decodeCcConnRsp, decodeCcParticipateRsp, decodeCcSetupRsp, decodeCcVerifyRsp, decodePlanetMsg, type NativeSetupOffer, type PlanetSetupOfferMaterial, type PlanetUserAgent } from "./schema.js";
 export interface PlanetTransportOpts {
     localMid: string;
+    /** Existing server call id for an incoming Talk notification. */
+    callId?: string;
     deviceInfo?: string;
     userAgent?: PlanetUserAgent;
     deviceId?: string;
@@ -64,6 +66,12 @@ export interface PlanetAnswerResult {
     connRspSent: boolean;
     mediaReady: boolean;
 }
+export interface PlanetIncomingAnswerResult {
+    verifyRsp: ReturnType<typeof decodeCcVerifyRsp>;
+    connRsp: ReturnType<typeof decodeCcConnRsp>;
+    peerOffer?: NativeSetupOffer;
+    mediaReady: boolean;
+}
 export interface PlanetGroupJoinResult {
     plaintext: Uint8Array;
     message: ReturnType<typeof decodePlanetMsg>;
@@ -89,6 +97,11 @@ export declare class PlanetTransport implements CallTransport {
     invite(opts: {
         to: string;
     }): Promise<Uint8Array>;
+    /**
+     * Accept an incoming 1:1 PLANET call.
+     * Native responder flow: VERIFY_REQ -> VERIFY_RSP(offer) -> CONN_REQ -> CONN_RSP.
+     */
+    answer(): Promise<PlanetIncomingAnswerResult>;
     joinGroupDetailed(opts: {
         roomId: string;
     }): Promise<PlanetGroupJoinResult>;

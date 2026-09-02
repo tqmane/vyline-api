@@ -185,6 +185,28 @@ export interface CcSetupReq {
     appSvrData?: string;
 }
 export declare function packCcSetupReq(r: CcSetupReq): Uint8Array;
+export interface CcVerifyReq {
+    initiator: string;
+    responder: string;
+    iZone?: string;
+    rZone?: string;
+    ua?: Uint8Array;
+    devId?: string;
+    commTypeFlags?: number;
+    capas?: number[];
+    credential?: Uint8Array;
+    svcKey?: string;
+    crt?: boolean;
+    netType?: number;
+    stid?: string;
+    svcId?: string;
+    tgtSvcId?: string;
+    uePublicAddr?: Uint8Array;
+    rVisitedZone?: string;
+    pathCheck?: boolean;
+    interDomain?: boolean;
+}
+export declare function packCcVerifyReq(r: CcVerifyReq): Uint8Array;
 export interface CcParticipateReq {
     participant: string;
     roomId: string;
@@ -462,6 +484,28 @@ export interface CcSetupRsp {
 }
 export declare function packCcSetupRsp(r: CcSetupRsp): Uint8Array;
 export declare function decodeCcSetupRsp(bytes: Uint8Array): CcSetupRsp;
+export interface CcVerifyRsp {
+    result?: number;
+    relCode?: number;
+    relPhrase?: string;
+    cfgs?: string;
+    oCapas: number[];
+    offer?: Uint8Array;
+    releaser?: string;
+    compCfgs?: Uint8Array;
+    compCfgsType?: number;
+    oUeData?: Uint8Array;
+    oUeDataCompType?: number;
+    oFeatures: Uint8Array[];
+    iCountry?: string;
+    iDevId?: string;
+    aliveRptInterval?: number;
+    stops?: string;
+    pt?: boolean;
+    maxCallTimeSec?: number;
+}
+export declare function packCcVerifyRsp(r: CcVerifyRsp): Uint8Array;
+export declare function decodeCcVerifyRsp(bytes: Uint8Array): CcVerifyRsp;
 export interface CcParticipateRsp {
     result?: number;
     relCode?: number;

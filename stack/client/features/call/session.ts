@@ -27,6 +27,7 @@ export type CallKind = "AUDIO" | "VIDEO" | "FACEPLAY";
 export interface CallSessionOpts {
   to: string;
   kind?: CallKind;
+  direction?: "outgoing" | "incoming";
   fromEnvInfo?: Record<string, string>;
   codecs?: CodecFactory;
   transport?: CallTransport;
@@ -42,6 +43,9 @@ export interface CallTransport {
   /** Optional. When present, CallSession.start() drives the full
    *  signaling dialog after connect() (SIP INVITE → 200 → ACK). */
   invite?(opts: { to: string }): Promise<unknown>;
+  /** Optional. Incoming-call transports complete their callee-side signaling
+   *  after connect() using the route delivered by NOTIFIED_RECEIVED_CALL. */
+  answer?(): Promise<unknown>;
   /** Optional. PLANET-style transports may enter ringing after INVITE and
    *  only become media-ready after the peer sends CONN_REQ. */
   waitForAnswer?(opts?: { to: string }): Promise<unknown>;
@@ -122,12 +126,20 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
         }));
       this.#setState("connecting");
       await this.#transport.connect({ route: this.#route });
-      if (this.#transport.invite) {
-        await this.#transport.invite({ to: this.#opts.to });
-      }
-      if (this.#transport.waitForAnswer) {
+      if (this.#opts.direction === "incoming") {
         this.#setState("ringing");
-        await this.#transport.waitForAnswer({ to: this.#opts.to });
+        if (!this.#transport.answer) {
+          throw new Error("CallTransport does not support incoming calls");
+        }
+        await this.#transport.answer();
+      } else {
+        if (this.#transport.invite) {
+          await this.#transport.invite({ to: this.#opts.to });
+        }
+        if (this.#transport.waitForAnswer) {
+          this.#setState("ringing");
+          await this.#transport.waitForAnswer({ to: this.#opts.to });
+        }
       }
       this.#setState("in-call");
       this.emit("connected", this.#route);

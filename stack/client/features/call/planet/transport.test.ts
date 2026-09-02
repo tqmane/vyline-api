@@ -17,13 +17,16 @@ import {
 import { makeChunkHdr } from "./framing.ts";
 import {
   CC_MSG,
+  decodeCcConnReq,
   decodeFields,
   decodeMcDataRsp,
   decodePlanetMsg,
   MC_MSG,
   packCcConnReq,
+  packCcConnRsp,
   packCcInfoReq,
   packCcSetupRsp,
+  packCcVerifyRsp,
   packMcDataReq,
   packNativeSetupOffer,
   packPlanetCcMsg,
@@ -317,6 +320,111 @@ Deno.test("PlanetTransport retains generated media offer material for SRTP setup
   assertEquals(media.material.mediaNonce.length, 16);
   assertEquals(media.material.mediaSecret.length, 30);
   assertEquals(media.offer.length, 311);
+});
+
+Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow", async () => {
+  const routePeer = generateEphemeralKeypair();
+  const peerMedia = generateEphemeralKeypair();
+  const peerOffer = packNativeSetupOffer({
+    mediaPubKey: peerMedia.publicKey,
+    mediaKeyId: 0x12345678,
+    mediaNonce: new Uint8Array(16).fill(0x44),
+    mediaSecret: new Uint8Array(30).fill(0x55),
+  });
+  const route = makeRoute(routePeer);
+  const cid = "incoming-call-mid";
+  const replySeed = new Uint8Array(16).fill(0x61);
+  const replyLabel = 0x3456;
+  const sessId = new Uint8Array(16).fill(0x62);
+  let serverSendKeys: TransportKeys | undefined;
+  const sentCcTags: number[] = [];
+
+  const verifyRspPlain = buildControlPlain({
+    bodyTag: CC_MSG.VERIFY_RSP,
+    bodyBytes: packCcVerifyRsp({
+      result: 0,
+      oCapas: [1, 2, 7],
+      offer: peerOffer,
+      oFeatures: [],
+    }),
+    msgId: 0x2142,
+    sessId,
+    locNonce: 0x123456n,
+    cid,
+    srcChanId: 0x1001n,
+  });
+  const connRspPlain = buildControlPlain({
+    bodyTag: CC_MSG.CONN_RSP,
+    bodyBytes: packCcConnRsp({ result: 0, mChanId: 0x3003n, netType: 1, unavailToSec: 120 }),
+    msgId: 0x2244,
+    sessId,
+    locNonce: 0x123456n,
+    cid,
+    srcChanId: 0x1001n,
+  });
+
+  const transport = new PlanetTransport({
+    localMid: "u-local",
+    callId: cid,
+    timeoutMs: 500,
+    wireSend(packet, endpoint) {
+      if (endpoint.plaintext.length === 519 || endpoint.plaintext.length === 10) return;
+      let msg: ReturnType<typeof decodePlanetMsg>;
+      try {
+        msg = decodePlanetMsg(endpoint.plaintext);
+      } catch {
+        return;
+      }
+      if (msg.cc?.bodyTag !== undefined) sentCcTags.push(msg.cc.bodyTag);
+      if (msg.cc?.bodyTag === CC_MSG.VERIFY_REQ) {
+        const clientPub = extractBootstrapClientPub(packet);
+        const clientLabel = extractBootstrapClientLabel(packet);
+        const clientSeed = extractBootstrapClientSeed(packet);
+        // Verify that the first control packet is the responder VERIFY bootstrap,
+        // never the outgoing caller SETUP_REQ.
+        assertEquals(endpoint.bootstrap, true);
+        const verifyFields = decodeFields(msg.cc.bodyBytes!);
+        assertEquals(new TextDecoder().decode(verifyFields.find((f) => f.tag === 1)!.value as Uint8Array), "u-peer");
+        assertEquals(new TextDecoder().decode(verifyFields.find((f) => f.tag === 2)!.value as Uint8Array), "u-local");
+        serverSendKeys = deriveCallKeys({
+          mpkey: clientPub,
+          local: routePeer,
+          bootstrapSeed: replySeed,
+          sendLabel: replyLabel,
+          recvLabel: replyLabel,
+        }).send;
+        // Deriving the client receive-side counterpart also proves the bootstrap
+        // values are structurally valid for this route.
+        deriveCallKeys({
+          mpkey: clientPub,
+          local: routePeer,
+          bootstrapSeed: clientSeed,
+          sendLabel: clientLabel,
+          recvLabel: clientLabel,
+        });
+        return buildServerWire(serverSendKeys, verifyRspPlain, 0x5101, {
+          bootstrap: { label: replyLabel, seed: replySeed, pub: routePeer.publicKey },
+        });
+      }
+      if (msg.cc?.bodyTag === CC_MSG.CONN_REQ) {
+        assert(serverSendKeys);
+        assertEquals(endpoint.bootstrap, false);
+        const conn = decodeCcConnReq(msg.cc.bodyBytes!);
+        assert(conn.answer && conn.answer.length > 0);
+        assertEquals(conn.mChanId !== undefined, true);
+        return buildServerWire(serverSendKeys, connRspPlain, 0x5102);
+      }
+    },
+  });
+
+  await transport.connect({ route });
+  const result = await transport.answer();
+  assert(result.mediaReady);
+  assertEquals(result.connRsp.result, 0);
+  assertEquals(sentCcTags[0], CC_MSG.VERIFY_REQ);
+  assertEquals(sentCcTags.includes(CC_MSG.SETUP_REQ), false);
+  assertEquals(sentCcTags.includes(CC_MSG.CONN_REQ), true);
+  await transport.close();
 });
 
 Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", async () => {

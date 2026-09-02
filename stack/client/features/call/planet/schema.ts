@@ -664,6 +664,57 @@ export function packCcSetupReq(r: CcSetupReq): Uint8Array {
   return finalize(b);
 }
 
+// ─── cc_verify_req — incoming 1:1 call verification ────────────────────
+//
+// Field numbers were recovered from libandromeda.so's protobuf-c
+// descriptors. VERIFY deliberately differs from SETUP after tag 8.
+
+export interface CcVerifyReq {
+  initiator: string; // tag 1
+  responder: string; // tag 2
+  iZone?: string; // tag 3
+  rZone?: string; // tag 4
+  ua?: Uint8Array; // tag 5 — packed PlanetUserAgent
+  devId?: string; // tag 6
+  commTypeFlags?: number; // tag 7 — enum
+  capas?: number[]; // tag 8 — repeated enum
+  credential?: Uint8Array; // tag 9
+  svcKey?: string; // tag 10
+  crt?: boolean; // tag 11
+  netType?: number; // tag 12 — enum
+  stid?: string; // tag 21
+  svcId?: string; // tag 51
+  tgtSvcId?: string; // tag 52
+  uePublicAddr?: Uint8Array; // tag 101 — packed PlanetAddr
+  rVisitedZone?: string; // tag 102
+  pathCheck?: boolean; // tag 105
+  interDomain?: boolean; // tag 153
+}
+
+export function packCcVerifyReq(r: CcVerifyReq): Uint8Array {
+  const b: Buf = { bytes: [] };
+  emitString(b, 1, r.initiator);
+  emitString(b, 2, r.responder);
+  if (r.iZone !== undefined) emitString(b, 3, r.iZone);
+  if (r.rZone !== undefined) emitString(b, 4, r.rZone);
+  if (r.ua) emitMessage(b, 5, r.ua);
+  if (r.devId !== undefined) emitString(b, 6, r.devId);
+  if (r.commTypeFlags !== undefined) emitEnum(b, 7, r.commTypeFlags);
+  for (const c of r.capas ?? []) emitEnum(b, 8, c);
+  if (r.credential) emitBytes(b, 9, r.credential);
+  if (r.svcKey !== undefined) emitString(b, 10, r.svcKey);
+  if (r.crt !== undefined) emitBool(b, 11, r.crt);
+  if (r.netType !== undefined) emitEnum(b, 12, r.netType);
+  if (r.stid !== undefined) emitString(b, 21, r.stid);
+  if (r.svcId !== undefined) emitString(b, 51, r.svcId);
+  if (r.tgtSvcId !== undefined) emitString(b, 52, r.tgtSvcId);
+  if (r.uePublicAddr) emitMessage(b, 101, r.uePublicAddr);
+  if (r.rVisitedZone !== undefined) emitString(b, 102, r.rVisitedZone);
+  if (r.pathCheck !== undefined) emitBool(b, 105, r.pathCheck);
+  if (r.interDomain !== undefined) emitBool(b, 153, r.interDomain);
+  return finalize(b);
+}
+
 // ─── cc_participate_req / rsp — group-call join flow ───────────────────
 
 export interface CcParticipateReq {
@@ -1524,6 +1575,74 @@ export function decodeCcSetupRsp(bytes: Uint8Array): CcSetupRsp {
     tgtSvcId: asStringField(fields, 152),
     interDomain: asBoolField(fields, 153),
     maxCallTimeSec: asNumberField(fields, 154),
+  };
+}
+
+export interface CcVerifyRsp {
+  result?: number; // tag 1
+  relCode?: number; // tag 2
+  relPhrase?: string; // tag 3
+  cfgs?: string; // tag 4
+  oCapas: number[]; // tag 5 — repeated enum
+  offer?: Uint8Array; // tag 6 — caller media/security offer
+  releaser?: string; // tag 8
+  compCfgs?: Uint8Array; // tag 9
+  compCfgsType?: number; // tag 10 — enum
+  oUeData?: Uint8Array; // tag 11
+  oUeDataCompType?: number; // tag 12 — enum
+  oFeatures: Uint8Array[]; // tag 13 — repeated message
+  iCountry?: string; // tag 14
+  iDevId?: string; // tag 101
+  aliveRptInterval?: number; // tag 102
+  stops?: string; // tag 103
+  pt?: boolean; // tag 111
+  maxCallTimeSec?: number; // tag 112
+}
+
+export function packCcVerifyRsp(r: CcVerifyRsp): Uint8Array {
+  const b: Buf = { bytes: [] };
+  if (r.result !== undefined) emitEnum(b, 1, r.result);
+  if (r.relCode !== undefined) emitUint32(b, 2, r.relCode);
+  if (r.relPhrase !== undefined) emitString(b, 3, r.relPhrase);
+  if (r.cfgs !== undefined) emitString(b, 4, r.cfgs);
+  for (const c of r.oCapas) emitEnum(b, 5, c);
+  if (r.offer) emitBytes(b, 6, r.offer);
+  if (r.releaser !== undefined) emitString(b, 8, r.releaser);
+  if (r.compCfgs) emitBytes(b, 9, r.compCfgs);
+  if (r.compCfgsType !== undefined) emitEnum(b, 10, r.compCfgsType);
+  if (r.oUeData) emitBytes(b, 11, r.oUeData);
+  if (r.oUeDataCompType !== undefined) emitEnum(b, 12, r.oUeDataCompType);
+  for (const feature of r.oFeatures) emitMessage(b, 13, feature);
+  if (r.iCountry !== undefined) emitString(b, 14, r.iCountry);
+  if (r.iDevId !== undefined) emitString(b, 101, r.iDevId);
+  if (r.aliveRptInterval !== undefined) emitUint32(b, 102, r.aliveRptInterval);
+  if (r.stops !== undefined) emitString(b, 103, r.stops);
+  if (r.pt !== undefined) emitBool(b, 111, r.pt);
+  if (r.maxCallTimeSec !== undefined) emitUint32(b, 112, r.maxCallTimeSec);
+  return finalize(b);
+}
+
+export function decodeCcVerifyRsp(bytes: Uint8Array): CcVerifyRsp {
+  const fields = decodeFields(bytes);
+  return {
+    result: asNumberField(fields, 1),
+    relCode: asNumberField(fields, 2),
+    relPhrase: asStringField(fields, 3),
+    cfgs: asStringField(fields, 4),
+    oCapas: repeatedNumbers(fields, 5),
+    offer: asBytesField(fields, 6),
+    releaser: asStringField(fields, 8),
+    compCfgs: asBytesField(fields, 9),
+    compCfgsType: asNumberField(fields, 10),
+    oUeData: asBytesField(fields, 11),
+    oUeDataCompType: asNumberField(fields, 12),
+    oFeatures: repeatedBytes(fields, 13),
+    iCountry: asStringField(fields, 14),
+    iDevId: asStringField(fields, 101),
+    aliveRptInterval: asNumberField(fields, 102),
+    stops: asStringField(fields, 103),
+    pt: asBoolField(fields, 111),
+    maxCallTimeSec: asNumberField(fields, 112),
   };
 }
 

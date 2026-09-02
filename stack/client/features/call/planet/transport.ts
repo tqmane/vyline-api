@@ -44,11 +44,14 @@ import {
   type CcConnReq,
   type CcParticipateReq,
   type CcSetupReq,
+  type CcVerifyReq,
   decodeCcConnReq,
+  decodeCcConnRsp,
   decodeCcInfoReq,
   decodeCcParticipateRsp,
   decodeCcRelReq,
   decodeCcSetupRsp,
+  decodeCcVerifyRsp,
   type DecodedField,
   decodeFields,
   decodeMcDataReq,
@@ -60,12 +63,14 @@ import {
   MC_MSG,
   type NativeSetupOffer,
   packBepiChannelOpen,
+  packCcConnReq,
   packCcConnRsp,
   packCcInfoReq,
   packCcInfoRsp,
   packCcParticipateReq,
   packCcRelReq,
   packCcSetupReq,
+  packCcVerifyReq,
   packKeepaliveReq,
   packMcChangeRsp,
   packMcCheckRpt,
@@ -102,6 +107,8 @@ import {
 
 export interface PlanetTransportOpts {
   localMid: string;
+  /** Existing server call id for an incoming Talk notification. */
+  callId?: string;
   deviceInfo?: string;
   userAgent?: PlanetUserAgent;
   deviceId?: string;
@@ -170,6 +177,13 @@ export interface PlanetAnswerResult {
   peerAnswerOffer?: NativeSetupOffer;
   peerOffer?: NativeSetupOffer;
   connRspSent: boolean;
+  mediaReady: boolean;
+}
+
+export interface PlanetIncomingAnswerResult {
+  verifyRsp: ReturnType<typeof decodeCcVerifyRsp>;
+  connRsp: ReturnType<typeof decodeCcConnRsp>;
+  peerOffer?: NativeSetupOffer;
   mediaReady: boolean;
 }
 
@@ -824,6 +838,7 @@ export class PlanetTransport implements CallTransport {
   #remoteCcChanId = 0n;
   #remoteMediaChanId = 0n;
   #targetMid?: string;
+  #incomingCall = false;
   #closed = true;
   #autoConnRspDuplicates = false;
   #connRspDuplicateInFlight = false;
@@ -878,7 +893,7 @@ export class PlanetTransport implements CallTransport {
     this.#bootstrapSeed = newSessionId();
     this.#sendLabel = crypto.getRandomValues(new Uint16Array(1))[0];
     this.#callUuid16 = crypto.getRandomValues(new Uint8Array(16));
-    this.#callUuid = crypto.randomUUID();
+    this.#callUuid = this.#opts.callId ?? crypto.randomUUID();
     this.#msgIdCounter = randomVarint2();
     this.#tranSeq = randomNativeTranSeq();
     if (this.#route.groupToken) {
@@ -902,6 +917,7 @@ export class PlanetTransport implements CallTransport {
     this.#remoteCcChanId = 0n;
     this.#remoteMediaChanId = 0n;
     this.#targetMid = undefined;
+    this.#incomingCall = false;
     this.#autoConnRspDuplicates = false;
     this.#connRspDuplicateInFlight = false;
     this.#localMediaOffer = undefined;
@@ -1472,6 +1488,127 @@ export class PlanetTransport implements CallTransport {
 
   async invite(opts: { to: string }): Promise<Uint8Array> {
     return (await this.inviteDetailed(opts)).plaintext;
+  }
+
+  async #sendVerify(): Promise<void> {
+    if (!this.#route || !this.#local) throw new Error("connect first");
+    const callerMid = this.#route.toMid;
+    if (!callerMid) throw new Error("incoming CallRoute.toMid missing");
+    this.#incomingCall = true;
+    this.#targetMid = callerMid;
+    this.#localMediaOffer ??= defaultLocalMediaOffer();
+    const cid = this.#callUuid!;
+    const verify: CcVerifyReq = {
+      initiator: callerMid,
+      responder: this.#opts.localMid,
+      iZone: this.#route.iZone,
+      rZone: this.#route.rZone,
+      ua: packPlanetUserAgent(
+        this.#opts.userAgent ?? defaultAndroidUserAgent(this.#opts.deviceInfo),
+      ),
+      devId: this.#opts.deviceId ?? randomBase64(32),
+      commTypeFlags: 1,
+      capas: this.#opts.capabilities ?? [1, 2, 3, 6, 7],
+      credential:
+        this.#opts.credential ??
+        defaultSetupCredential(this.#route, callerMid, this.#opts.localMid, cid),
+      svcKey: this.#opts.serviceKey ?? "freecall.audio",
+      crt: false,
+      netType: 1,
+      stid: this.#route.stid,
+      pathCheck: false,
+    };
+    const ccBody = wrapCcMsg(CC_MSG.VERIFY_REQ, packCcVerifyReq(verify));
+    const ccMsg = packPlanetCcMsg(
+      { cid, srcChanId: this.#srcChanId, dstChanId: 0n },
+      ccBody,
+    );
+    await this.#sendEnvelope(
+      { kind: "cc", data: ccMsg },
+      { bootstrap: true, msgId: ccMsgId(CC_MSG.VERIFY_REQ) },
+    );
+    this.#setupSent = true;
+  }
+
+  async #sendIncomingConnReq(
+    verifyReply: PlanetIncomingMessage & { message: ReturnType<typeof decodePlanetMsg> },
+  ): Promise<CcConnReq> {
+    const local = this.#localMediaOffer;
+    if (!local) throw new Error("incoming media offer missing");
+    const connReq: CcConnReq = {
+      answer: local.offer,
+      mChanId: this.#localMediaChanId,
+      netType: 1,
+      unavailToSec: 120,
+      oCapas: this.#opts.capabilities ?? [1, 2, 3, 6, 7],
+      features: this.#opts.features ?? defaultSetupFeatures(),
+      ua: packPlanetUserAgent(
+        this.#opts.userAgent ?? defaultAndroidUserAgent(this.#opts.deviceInfo),
+      ),
+      devId: this.#opts.deviceId ?? randomBase64(32),
+      reqRec: false,
+    };
+    const ccBody = wrapCcMsg(CC_MSG.CONN_REQ, packCcConnReq(connReq));
+    const ccMsg = packPlanetCcMsg(
+      {
+        cid: verifyReply.message.cc?.hdr?.cid ?? this.#callUuid ?? "incoming-call",
+        srcChanId: this.#srcChanId,
+        dstChanId: verifyReply.message.cc?.hdr?.srcChanId ?? this.#remoteCcChanId,
+      },
+      ccBody,
+    );
+    await this.#sendEnvelope({ kind: "cc", data: ccMsg }, { msgId: ccMsgId(CC_MSG.CONN_REQ) });
+    return connReq;
+  }
+
+  /**
+   * Accept an incoming 1:1 PLANET call.
+   * Native responder flow: VERIFY_REQ -> VERIFY_RSP(offer) -> CONN_REQ -> CONN_RSP.
+   */
+  async answer(): Promise<PlanetIncomingAnswerResult> {
+    await this.#sendVerify();
+    const verifyReply = await this.#waitForCc(CC_MSG.VERIFY_RSP, this.#opts.timeoutMs ?? 10000);
+    const verifyBytes = verifyReply.message.cc?.bodyBytes;
+    if (!verifyBytes) throw new Error("PLANET verify_rsp missing body");
+    const verifyRsp = decodeCcVerifyRsp(verifyBytes);
+    if ((verifyRsp.result ?? 0) !== 0 || (verifyRsp.relCode ?? 0) !== 0) {
+      throw new Error(
+        `PLANET verify rejected (${verifyRsp.result ?? 0}/${verifyRsp.relCode ?? 0})${
+          verifyRsp.relPhrase ? `: ${verifyRsp.relPhrase}` : ""
+        }`,
+      );
+    }
+    this.#remoteCcChanId = verifyReply.message.cc?.hdr?.srcChanId ?? this.#remoteCcChanId;
+    const peerOffer = tryDecodeNativeSetupOffer(verifyRsp.offer);
+    const mediaReady = await this.#configureMedia(peerOffer, {
+      answer: verifyRsp.offer,
+      netType: 1,
+      unavailToSec: 120,
+      oCapas: verifyRsp.oCapas,
+      features: verifyRsp.oFeatures,
+    });
+    if (!mediaReady) throw new Error("PLANET incoming media negotiation failed");
+
+    await this.#sendPinholeProbes();
+    await this.#sendKeepalive();
+    this.#startKeepalive(verifyRsp.aliveRptInterval);
+
+    const connReq = await this.#sendIncomingConnReq(verifyReply);
+    const connReply = await this.#waitForCc(CC_MSG.CONN_RSP, this.#opts.timeoutMs ?? 10000);
+    const connBytes = connReply.message.cc?.bodyBytes;
+    if (!connBytes) throw new Error("PLANET conn_rsp missing body");
+    const connRsp = decodeCcConnRsp(connBytes);
+    if ((connRsp.result ?? 0) !== 0 || (connRsp.relCode ?? 0) !== 0) {
+      throw new Error(
+        `PLANET connect rejected (${connRsp.result ?? 0}/${connRsp.relCode ?? 0})${
+          connRsp.relPhrase ? `: ${connRsp.relPhrase}` : ""
+        }`,
+      );
+    }
+    this.#remoteCcChanId = connReply.message.cc?.hdr?.srcChanId ?? this.#remoteCcChanId;
+    this.#remoteMediaChanId = connRsp.mChanId ?? this.#remoteMediaChanId;
+    await this.#sendExchangeAppStrDataInfoReq(connReply, connReq);
+    return { verifyRsp, connRsp, peerOffer, mediaReady };
   }
 
   async #sendParticipate(opts: { roomId: string }): Promise<void> {
@@ -2197,7 +2334,7 @@ export class PlanetTransport implements CallTransport {
             })
           : packCcRelReq({
               relCode: 2,
-              releaser: "initiator",
+              releaser: this.#incomingCall ? "responder" : "initiator",
               commMediaFlags: 1,
             });
         const ccBody = wrapCcMsg(CC_MSG.REL_REQ, relBody);
