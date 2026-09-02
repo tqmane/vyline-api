@@ -107,6 +107,42 @@ Deno.test("CallSession.start is idempotent", async () => {
   assertEquals(r1, r2);
 });
 
+Deno.test("CallSession.answer uses incoming route without acquireCallRoute", async () => {
+  const { client, acquired, fakeRoute } = fakeClient();
+  let answered = 0;
+  const transport = recordingTransport();
+  transport.answer = () => {
+    answered += 1;
+    return Promise.resolve();
+  };
+  const session = new CallSession(client, {
+    to: "c-chat",
+    kind: "AUDIO",
+    transport,
+    preacquiredRoute: fakeRoute as never,
+  });
+  const states: string[] = [];
+  session.on("state", (s) => states.push(s));
+
+  const route = await session.answer();
+
+  assertEquals(route, fakeRoute);
+  assertEquals(acquired.length, 0);
+  assertEquals(answered, 1);
+  assertEquals(states, ["connecting", "ringing", "in-call"]);
+});
+
+Deno.test("CallSession.answer rejects when incoming route is absent", async () => {
+  const { client, acquired } = fakeClient();
+  const transport = recordingTransport();
+  transport.answer = () => Promise.resolve();
+  const session = new CallSession(client, { to: "c-chat", transport });
+
+  await assertRejects(() => session.answer(), Error, "incoming VoIP route not configured");
+  assertEquals(acquired.length, 0);
+  assertEquals(session.state, "failed");
+});
+
 Deno.test("CallSession.sendStream pumps PCM through codec → transport", async () => {
   const { client } = fakeClient();
   const transport = recordingTransport();
