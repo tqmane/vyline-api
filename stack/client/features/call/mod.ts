@@ -14,6 +14,12 @@ export type {
   CallTransport,
 } from "./session.js";
 export {
+  type IncomingCallRoutePayload,
+  type IncomingVoipPushType,
+  parseIncomingCallRoutePayload,
+  toAndromedaCallRoute,
+} from "./incoming.js";
+export {
   type AudioDecoder,
   type AudioEncoder,
   type AudioSink,
@@ -276,10 +282,9 @@ export function createCallClient(client: Client): CallClient {
   return new ClientCall(client);
 }
 
+/** Talk operation signal only. Caller/type/media route come from VoIP push. */
 export interface IncomingCallEvent {
-  callMid: string;
-  from: string;
-  kind?: string;
+  chatId: string;
   raw: LINETypes.Operation;
 }
 
@@ -292,9 +297,7 @@ export interface CancelCallEvent {
 
 export function parseIncomingCall(op: LINETypes.Operation): IncomingCallEvent {
   return {
-    callMid: (op as { param1?: string }).param1 ?? "",
-    from: (op as { param2?: string }).param2 ?? "",
-    kind: (op as { param3?: string }).param3,
+    chatId: (op as { param1?: string }).param1 ?? "",
     raw: op,
   };
 }
