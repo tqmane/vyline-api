@@ -7,6 +7,7 @@ import { defaultCodecFactory } from "./audio.js";
 import { CallSession, type CallSessionOpts, type CallTransport } from "./session.js";
 
 export type {
+  CallAudioProfile,
   CallSession,
   CallSessionEvents,
   CallSessionOpts,

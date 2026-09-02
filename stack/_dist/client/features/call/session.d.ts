@@ -14,7 +14,15 @@ export interface CallSessionOpts {
     /** transport 選択のため事前 acquire した route（二重 acquire 回避） */
     preacquiredRoute?: LINETypes.CallRoute;
 }
+export interface CallAudioProfile {
+    frameDurationMs?: number;
+    bitrate?: number;
+    bandwidth?: "narrowband" | "mediumband" | "wideband" | "superwideband" | "fullband";
+    signal?: "auto" | "voice" | "music";
+    vbr?: boolean;
+}
 export interface CallTransport {
+    readonly audioProfile?: CallAudioProfile | undefined;
     connect(opts: {
         route: LINETypes.CallRoute;
     }): Promise<void>;

@@ -17,7 +17,7 @@
 import { Buffer } from "node:buffer";
 import type { Socket as DgramSocket } from "node:dgram";
 import type * as LINETypes from "@vyline/line-types";
-import type { CallTransport } from "../session.ts";
+import type { CallAudioProfile, CallTransport } from "../session.ts";
 import { makeChunkHdr, parseFrameHeader } from "./framing.js";
 import {
   aesCtrDecrypt,
@@ -858,6 +858,17 @@ export class PlanetTransport implements CallTransport {
 
   constructor(opts: PlanetTransportOpts) {
     this.#opts = opts;
+  }
+
+  get audioProfile(): CallAudioProfile | undefined {
+    if (this.#groupJoined) return undefined;
+    return {
+      frameDurationMs: 40,
+      bitrate: 16000,
+      bandwidth: "fullband" as const,
+      signal: "voice" as const,
+      vbr: false,
+    };
   }
 
   #debug(event: Record<string, unknown>) {
@@ -2364,7 +2375,8 @@ export class PlanetTransport implements CallTransport {
     if (!this.#srtpSend || !this.#rtp) {
       throw new Error("PlanetTransport.send: media not established");
     }
-    const timestampStep = opts.timestampStep ?? this.#opts.rtpTimestampStep ?? 960;
+    const timestampStep =
+      opts.timestampStep ?? this.#opts.rtpTimestampStep ?? (this.#groupJoined ? 960 : 1920);
     const extensionData = this.#nextAudioRtpExtension();
     const timestamp = this.#nextAudioRtpTimestamp(timestampStep);
     const seq = this.#rtp.seq++ & 0xffff;
@@ -2548,8 +2560,27 @@ export class PlanetTransport implements CallTransport {
       try {
         const decrypted = await this.#decryptMediaRtp(wire);
         const parsed = parseRtp(decrypted.rtp);
+        if (this.#rtp && parsed.payloadType !== this.#rtp.payloadType) {
+          this.#debug({
+            type: "media_ignored",
+            reason: "unexpected_payload_type",
+            payloadType: parsed.payloadType,
+            expectedPayloadType: this.#rtp.payloadType,
+            ssrc: parsed.ssrc,
+          });
+          continue;
+        }
         const payload =
           !this.#groupJoined && parsed.payload[0] === 0 ? parsed.payload.subarray(1) : parsed.payload;
+        if (payload.length === 0) {
+          this.#debug({
+            type: "media_ignored",
+            reason: "empty_audio_payload",
+            payloadType: parsed.payloadType,
+            ssrc: parsed.ssrc,
+          });
+          continue;
+        }
         this.#debug({
           type: "media_recv",
           bytes: wire.length,

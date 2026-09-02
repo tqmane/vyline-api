@@ -35,7 +35,16 @@ export interface CallSessionOpts {
   preacquiredRoute?: LINETypes.CallRoute;
 }
 
+export interface CallAudioProfile {
+  frameDurationMs?: number;
+  bitrate?: number;
+  bandwidth?: "narrowband" | "mediumband" | "wideband" | "superwideband" | "fullband";
+  signal?: "auto" | "voice" | "music";
+  vbr?: boolean;
+}
+
 export interface CallTransport {
+  readonly audioProfile?: CallAudioProfile | undefined;
   connect(opts: { route: LINETypes.CallRoute }): Promise<void>;
   close(): Promise<void>;
   send(packet: Uint8Array): void | Promise<void>;
@@ -160,14 +169,35 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
     const signal = opts.signal
       ? mergeSignals(opts.signal, this.#sendAbort.signal)
       : this.#sendAbort.signal;
+    const audioProfile = this.#transport.audioProfile;
     const enc = (this.#encoder ??= this.#codecs.newEncoder({
       sampleRate: 48000,
       channels: 1,
+      ...audioProfile,
     }));
+    const targetFrameSamples = audioProfile?.frameDurationMs
+      ? Math.floor((48000 * audioProfile.frameDurationMs) / 1000)
+      : 0;
+    let pending = new Int16Array(0);
     for await (const frame of source.frames({ signal })) {
       if (signal.aborted) break;
-      const packet = enc.encode(frame);
-      if (packet) await this.#transport.send(packet);
+      if (targetFrameSamples <= 0 || frame.sampleRate !== 48000 || frame.channels !== 1) {
+        const packet = enc.encode(frame);
+        if (packet) await this.#transport.send(packet);
+        continue;
+      }
+
+      const combined = new Int16Array(pending.length + frame.samples.length);
+      combined.set(pending);
+      combined.set(frame.samples, pending.length);
+      let offset = 0;
+      while (offset + targetFrameSamples <= combined.length) {
+        const samples = combined.slice(offset, offset + targetFrameSamples);
+        const packet = enc.encode({ samples, sampleRate: 48000, channels: 1 });
+        if (packet) await this.#transport.send(packet);
+        offset += targetFrameSamples;
+      }
+      pending = combined.slice(offset);
     }
   }
 
@@ -204,8 +234,13 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
       channels: 1,
     }));
     for await (const packet of this.#transport.receive()) {
-      const frame = dec.decode(packet);
-      if (frame) await sink.write(frame);
+      try {
+        const frame = dec.decode(packet);
+        if (frame) await sink.write(frame);
+      } catch {
+        // A single malformed/unsupported RTP payload must not terminate the
+        // whole receive loop. Packet loss is preferable to killing the call.
+      }
     }
     await sink.end?.();
   }
@@ -219,8 +254,12 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
       channels: 1,
     }));
     for await (const packet of this.#transport.receive()) {
-      const frame = dec.decode(packet);
-      if (frame) yield frame;
+      try {
+        const frame = dec.decode(packet);
+        if (frame) yield frame;
+      } catch {
+        // Keep receiving after an isolated malformed/unsupported media packet.
+      }
     }
   }
 

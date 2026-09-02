@@ -14,7 +14,7 @@
  *   6. close(): send REL_REQ
  */
 import type * as LINETypes from "@vyline/line-types";
-import type { CallTransport } from "../session.ts";
+import type { CallAudioProfile, CallTransport } from "../session.ts";
 import { type EphemeralKeypair } from "./crypto.js";
 import { type CcConnReq, decodeCcConnRsp, decodeCcParticipateRsp, decodeCcSetupRsp, decodeCcVerifyRsp, decodePlanetMsg, type NativeSetupOffer, type PlanetSetupOfferMaterial, type PlanetUserAgent } from "./schema.js";
 export interface PlanetTransportOpts {
@@ -87,6 +87,7 @@ export interface PlanetLocalMediaOffer {
 export declare class PlanetTransport implements CallTransport {
     #private;
     constructor(opts: PlanetTransportOpts);
+    get audioProfile(): CallAudioProfile | undefined;
     get localMediaOffer(): PlanetLocalMediaOffer | undefined;
     connect(opts: {
         route: LINETypes.CallRoute | LINETypes.GroupCallRoute;
