@@ -1968,7 +1968,8 @@ export class PlanetTransport implements CallTransport {
     }
     if (this.#mediaKeyCandidates.length === 0) return false;
     const requestedMode =
-      this.#opts.mediaKeyMode ?? (this.#groupJoined ? "audio-secret-sender" : "current");
+      this.#opts.mediaKeyMode ??
+      (this.#groupJoined ? "audio-secret-sender" : "audio-reverse-stage");
     const initialMode = requestedMode === "auto" ? "current" : requestedMode;
     const initial = this.#mediaKeyCandidates.find((c) => c.mode === initialMode);
     if (!initial) return false;
@@ -2367,13 +2368,16 @@ export class PlanetTransport implements CallTransport {
     const extensionData = this.#nextAudioRtpExtension();
     const timestamp = this.#nextAudioRtpTimestamp(timestampStep);
     const seq = this.#rtp.seq++ & 0xffff;
+    const payload = this.#groupJoined
+      ? opusPacket
+      : concatBytes([new Uint8Array([0]), opusPacket]);
     const rtp = buildRtp({
       payloadType: this.#rtp.payloadType,
       marker: this.#groupJoined && this.#groupAudioExtensionIndex === 3,
       seq,
       timestamp,
       ssrc: this.#rtp.ssrc,
-      payload: opusPacket,
+      payload,
       extensionProfile: 0x0240,
       extensionData,
     });
@@ -2381,7 +2385,7 @@ export class PlanetTransport implements CallTransport {
     this.#debug({
       type: "media_send",
       bytes: wire.length,
-      payloadBytes: opusPacket.length,
+      payloadBytes: payload.length,
       payloadType: this.#rtp.payloadType,
       marker: (rtp[1] & 0x80) !== 0,
       ssrc: this.#rtp.ssrc,
@@ -2544,16 +2548,18 @@ export class PlanetTransport implements CallTransport {
       try {
         const decrypted = await this.#decryptMediaRtp(wire);
         const parsed = parseRtp(decrypted.rtp);
+        const payload =
+          !this.#groupJoined && parsed.payload[0] === 0 ? parsed.payload.subarray(1) : parsed.payload;
         this.#debug({
           type: "media_recv",
           bytes: wire.length,
-          payloadBytes: parsed.payload.length,
+          payloadBytes: payload.length,
           payloadType: parsed.payloadType,
           ssrc: parsed.ssrc,
           mediaKeyMode: decrypted.mode,
           mediaKeySwitched: decrypted.switched,
         });
-        yield parsed.payload;
+        yield payload;
       } catch (e) {
         this.#debug({
           type: "media_decrypt_fail",

@@ -8,6 +8,7 @@ import {
   buildPlanetCtrIv,
   deriveCallKeys,
   derivePlanetMediaKeys,
+  derivePlanetMediaStreamKeying,
   type EphemeralKeypair,
   generateEphemeralKeypair,
   hmacTag,
@@ -37,7 +38,7 @@ import {
   wrapMcMsg,
 } from "./schema.ts";
 import { PlanetTransport } from "./transport.ts";
-import { deriveSrtpContext, parseRtp, srtpDecrypt } from "../srtp.ts";
+import { buildRtp, deriveSrtpContext, parseRtp, srtpDecrypt, srtpEncrypt } from "../srtp.ts";
 
 type CallRouteLike = Parameters<PlanetTransport["connect"]>[0]["route"];
 
@@ -332,7 +333,9 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
     mediaSecret: new Uint8Array(30).fill(0x55),
   });
   const route = makeRoute(routePeer);
-  const cid = "incoming-call-mid";
+  // Android 26.13.0 passes incoming JSON `vs` (voipSessionId) to native as
+  // CallSession.InitiatorInfo.communicationId; Planet uses that value as CID.
+  const cid = String(route.stid);
   const replySeed = new Uint8Array(16).fill(0x61);
   const replyLabel = 0x3456;
   const sessId = new Uint8Array(16).fill(0x62);
@@ -377,6 +380,7 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
       }
       if (msg.cc?.bodyTag !== undefined) sentCcTags.push(msg.cc.bodyTag);
       if (msg.cc?.bodyTag === CC_MSG.VERIFY_REQ) {
+        assertEquals(msg.cc.hdr?.cid, cid);
         const clientPub = extractBootstrapClientPub(packet);
         const clientLabel = extractBootstrapClientLabel(packet);
         const clientSeed = extractBootstrapClientSeed(packet);
@@ -706,12 +710,31 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
         mediaNonce: localMedia.material.mediaNonce,
       },
     });
-    const peerRecv = await deriveSrtpContext(peerKeys.recvKeying);
+    const peerRecv = await deriveSrtpContext(
+      derivePlanetMediaStreamKeying(peerKeys.sendKeying, "AUDIO"),
+    );
+    const peerSend = await deriveSrtpContext(
+      derivePlanetMediaStreamKeying(peerKeys.recvKeying, "AUDIO"),
+    );
     const opus = new Uint8Array([0xf8, 0xff, 0xfe]);
     await transport.send(opus);
     const receivedWire = await withTimeout(mediaWire, 1000, "media");
     const rtp = await srtpDecrypt(peerRecv, receivedWire);
-    assertEquals(parseRtp(rtp).payload, opus);
+    assertEquals(parseRtp(rtp).payload, concatBytes([new Uint8Array([0]), opus]));
+
+    const remoteOpus = new Uint8Array([0xf8, 0xff, 0xfd]);
+    const remoteRtp = buildRtp({
+      payloadType: 96,
+      seq: 0x3210,
+      timestamp: 960,
+      ssrc: 0x10203040,
+      payload: concatBytes([new Uint8Array([0]), remoteOpus]),
+    });
+    const remoteWire = await srtpEncrypt(peerSend, remoteRtp);
+    const receivedAudio = transport.receive()[Symbol.asyncIterator]().next();
+    await sendUdp(mediaServer, remoteWire, clientRinfo);
+    const remotePacket = await withTimeout(receivedAudio, 1000, "remote audio");
+    assertEquals(remotePacket.value, remoteOpus);
     await transport.close();
     transportClosed = true;
     assertEquals(await withTimeout(relReq, 1000, "rel_req"), {
