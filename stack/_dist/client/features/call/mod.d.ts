@@ -3,7 +3,7 @@ import type * as LINETypes from "@vyline/line-types";
 import type { DeviceDetails } from "../../../base/mod.ts";
 import type { CodecFactory } from "./audio.js";
 import { CallSession, type CallSessionOpts } from "./session.js";
-export type { CallSession, CallSessionEvents, CallSessionOpts, CallSessionState, CallTransport, } from "./session.js";
+export type { CallAudioProfile, CallSession, CallSessionEvents, CallSessionOpts, CallSessionState, CallTransport, } from "./session.js";
 export { type AudioDecoder, type AudioEncoder, type AudioSink, type AudioSource, bufferSink, bufferSource, type CodecFactory, decodeWavSync, defaultCodecFactory, type FileDecoder, type NativeGroupOpusPacketizeOptions, packetizeNativeGroupOpusPairs, type PcmFrame, resampleLinear, streamSink, streamSource, } from "./audio.js";
 export { stubTransport } from "./session.js";
 export { AndromedaTransport, type AndromedaTransportOpts } from "./andromeda.js";

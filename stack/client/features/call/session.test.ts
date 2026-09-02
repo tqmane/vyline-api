@@ -81,6 +81,22 @@ function passthroughCodecs(): CodecFactory {
   };
 }
 
+function codecsWithOneBadPacket(): CodecFactory {
+  const base = passthroughCodecs();
+  return {
+    newEncoder: base.newEncoder,
+    newDecoder(opts): AudioDecoder {
+      const decoder = base.newDecoder(opts);
+      return {
+        decode(packet) {
+          if (packet[0] === 0xff) throw new Error("malformed opus packet");
+          return decoder.decode(packet);
+        },
+      };
+    },
+  };
+}
+
 Deno.test("CallSession.start → acquiring → connecting → in-call state transitions", async () => {
   const { client, acquired } = fakeClient();
   const session = new CallSession(client, {
@@ -159,6 +175,56 @@ Deno.test("CallSession.sendStream pumps PCM through codec → transport", async 
   assertEquals(dv.getInt16(4, false), 42);
 });
 
+Deno.test("CallSession.sendStream follows a transport 40ms voice profile", async () => {
+  const { client } = fakeClient();
+  const sent: Uint8Array[] = [];
+  const encodedLengths: number[] = [];
+  let encoderOptions: Parameters<CodecFactory["newEncoder"]>[0] | undefined;
+  const transport: CallTransport = {
+    audioProfile: {
+      frameDurationMs: 40,
+      bitrate: 16000,
+      bandwidth: "fullband",
+      signal: "voice",
+      vbr: false,
+    },
+    connect: () => Promise.resolve(),
+    close: () => Promise.resolve(),
+    send(packet) {
+      sent.push(packet);
+    },
+    async *receive() {},
+  };
+  const codecs: CodecFactory = {
+    newEncoder(opts): AudioEncoder {
+      encoderOptions = opts;
+      return {
+        encode(frame) {
+          encodedLengths.push(frame.samples.length);
+          return new Uint8Array([frame.samples.length >>> 8, frame.samples.length & 0xff]);
+        },
+      };
+    },
+    newDecoder(): AudioDecoder {
+      return { decode: () => null };
+    },
+  };
+  const session = new CallSession(client, { to: "u-p", transport, codecs });
+  await session.start();
+  const samples = new Int16Array(1920);
+  samples.fill(123);
+
+  await session.sendStream(bufferSource({ samples, sampleRate: 48000, frameDurationMs: 20 }));
+
+  assertEquals(sent.length, 1);
+  assertEquals(encodedLengths, [1920]);
+  assertEquals(encoderOptions?.frameDurationMs, 40);
+  assertEquals(encoderOptions?.bitrate, 16000);
+  assertEquals(encoderOptions?.bandwidth, "fullband");
+  assertEquals(encoderOptions?.signal, "voice");
+  assertEquals(encoderOptions?.vbr, false);
+});
+
 Deno.test("CallSession.sendStream rejects when not in-call", async () => {
   const { client } = fakeClient();
   const session = new CallSession(client, { to: "u-p", transport: recordingTransport() });
@@ -200,6 +266,33 @@ Deno.test("CallSession.received yields decoded peer PCM frames", async () => {
   assertEquals(collected, [10, 20, 30]);
 });
 
+Deno.test("CallSession.received skips one malformed audio packet and keeps receiving", async () => {
+  const { client } = fakeClient();
+  const good = new Uint8Array(8);
+  new DataView(good.buffer).setUint32(0, 1, false);
+  new DataView(good.buffer).setInt16(4, 77, false);
+  const transport: CallTransport = {
+    connect: () => Promise.resolve(),
+    close: () => Promise.resolve(),
+    send() {},
+    async *receive() {
+      yield new Uint8Array([0xff]);
+      yield good;
+    },
+  };
+  const session = new CallSession(client, {
+    to: "u-p",
+    transport,
+    codecs: codecsWithOneBadPacket(),
+  });
+  await session.start();
+
+  const collected: number[] = [];
+  for await (const frame of session.received()) collected.push(frame.samples[0]);
+
+  assertEquals(collected, [77]);
+});
+
 Deno.test("CallSession.receiveInto pipes to AudioSink + closes on stream end", async () => {
   const { client } = fakeClient();
   const transport: CallTransport = {
@@ -227,6 +320,34 @@ Deno.test("CallSession.receiveInto pipes to AudioSink + closes on stream end", a
   await session.receiveInto(sink);
   assertEquals(sink.frames.length, 1);
   assertEquals(sink.frames[0].samples[0], 99);
+});
+
+Deno.test("CallSession.receiveInto skips one malformed audio packet and keeps receiving", async () => {
+  const { client } = fakeClient();
+  const good = new Uint8Array(8);
+  new DataView(good.buffer).setUint32(0, 1, false);
+  new DataView(good.buffer).setInt16(4, 88, false);
+  const transport: CallTransport = {
+    connect: () => Promise.resolve(),
+    close: () => Promise.resolve(),
+    send() {},
+    async *receive() {
+      yield new Uint8Array([0xff]);
+      yield good;
+    },
+  };
+  const session = new CallSession(client, {
+    to: "u-p",
+    transport,
+    codecs: codecsWithOneBadPacket(),
+  });
+  await session.start();
+  const sink = bufferSink();
+
+  await session.receiveInto(sink);
+
+  assertEquals(sink.frames.length, 1);
+  assertEquals(sink.frames[0].samples[0], 88);
 });
 
 Deno.test("CallSession.end transitions to ending → ended + emits 'ended'", async () => {
