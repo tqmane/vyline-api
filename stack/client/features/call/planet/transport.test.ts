@@ -26,6 +26,7 @@ import {
   packCcConnReq,
   packCcConnRsp,
   packCcInfoReq,
+  packCcRelReq,
   packCcSetupRsp,
   packCcVerifyRsp,
   packMcDataReq,
@@ -757,4 +758,118 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await new Promise<void>((resolve) => mediaServer.close(() => resolve()));
   }
+});
+
+Deno.test("PlanetTransport ends media on remote REL_REQ (peer hangup)", async () => {
+  const routePeer = generateEphemeralKeypair();
+  const peerMedia = generateEphemeralKeypair();
+  const peerOffer = packNativeSetupOffer({
+    mediaPubKey: peerMedia.publicKey,
+    mediaKeyId: 0x12345678,
+    mediaNonce: new Uint8Array(16).fill(0x44),
+    mediaSecret: new Uint8Array(30).fill(0x55),
+  });
+  const route = makeRoute(routePeer);
+  const cid = String(route.stid);
+  const replySeed = new Uint8Array(16).fill(0x61);
+  const replyLabel = 0x3456;
+  const sessId = new Uint8Array(16).fill(0x62);
+  let serverSendKeys: TransportKeys | undefined;
+  let answerDone = false;
+  const sentCcTags: number[] = [];
+
+  const verifyRspPlain = buildControlPlain({
+    bodyTag: CC_MSG.VERIFY_RSP,
+    bodyBytes: packCcVerifyRsp({
+      result: 0,
+      oCapas: [1, 2, 7],
+      offer: peerOffer,
+      oFeatures: [],
+    }),
+    msgId: 0x2142,
+    sessId,
+    locNonce: 0x123456n,
+    cid,
+    srcChanId: 0x1001n,
+  });
+  const connRspPlain = buildControlPlain({
+    bodyTag: CC_MSG.CONN_RSP,
+    bodyBytes: packCcConnRsp({ result: 0, mChanId: 0x3003n, netType: 1, unavailToSec: 120 }),
+    msgId: 0x2244,
+    sessId,
+    locNonce: 0x123456n,
+    cid,
+    srcChanId: 0x1001n,
+  });
+  const relReqPlain = buildControlPlain({
+    bodyTag: CC_MSG.REL_REQ,
+    bodyBytes: packCcRelReq({ relCode: 2, releaser: "initiator", commMediaFlags: 1 }),
+    msgId: 0x2245,
+    sessId,
+    locNonce: 0x123456n,
+    cid,
+    srcChanId: 0x1001n,
+  });
+
+  const transport = new PlanetTransport({
+    localMid: "u-local",
+    callId: cid,
+    timeoutMs: 500,
+    keepaliveIntervalMs: 10,
+    wireSend(packet, endpoint) {
+      if (endpoint.plaintext.length === 519 || endpoint.plaintext.length === 10) return;
+      let msg: ReturnType<typeof decodePlanetMsg>;
+      try {
+        msg = decodePlanetMsg(endpoint.plaintext);
+      } catch {
+        return;
+      }
+      if (msg.scBytes) {
+        // keepalive tick after the call is up -> simulate the peer hanging up
+        if (answerDone && serverSendKeys) {
+          return buildServerWire(serverSendKeys, relReqPlain, 0x5103);
+        }
+        return;
+      }
+      if (msg.cc?.bodyTag !== undefined) sentCcTags.push(msg.cc.bodyTag);
+      if (msg.cc?.bodyTag === CC_MSG.VERIFY_REQ) {
+        const clientPub = extractBootstrapClientPub(packet);
+        serverSendKeys = deriveCallKeys({
+          mpkey: clientPub,
+          local: routePeer,
+          bootstrapSeed: replySeed,
+          sendLabel: replyLabel,
+          recvLabel: replyLabel,
+        }).send;
+        return buildServerWire(serverSendKeys, verifyRspPlain, 0x5101, {
+          bootstrap: { label: replyLabel, seed: replySeed, pub: routePeer.publicKey },
+        });
+      }
+      if (msg.cc?.bodyTag === CC_MSG.CONN_REQ) {
+        assert(serverSendKeys);
+        return buildServerWire(serverSendKeys, connRspPlain, 0x5102);
+      }
+    },
+  });
+
+  await transport.connect({ route });
+  const result = await transport.answer();
+  assert(result.mediaReady);
+  answerDone = true;
+
+  // Peer hangs up on the next keepalive: receive() must terminate instead of
+  // hanging in-call forever.
+  const received: Uint8Array[] = [];
+  await withTimeout(
+    (async () => {
+      for await (const payload of transport.receive()) received.push(payload);
+    })(),
+    2000,
+    "receive ends on REL",
+  );
+  assertEquals(transport.remoteEnded, true);
+  assert((transport.remoteEndReason ?? "").includes("relCode=2"));
+  // Local side must not answer a release with its own REL_REQ.
+  assertEquals(sentCcTags.includes(CC_MSG.REL_REQ), false);
+  await transport.close();
 });

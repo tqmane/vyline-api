@@ -839,6 +839,9 @@ export class PlanetTransport implements CallTransport {
   #remoteMediaChanId = 0n;
   #targetMid?: string;
   #incomingCall = false;
+  /** True once the peer released the call (REL_REQ). receive() then terminates. */
+  #remoteEnded = false;
+  #remoteEndReason?: string;
   #closed = true;
   #autoConnRspDuplicates = false;
   #connRspDuplicateInFlight = false;
@@ -858,6 +861,15 @@ export class PlanetTransport implements CallTransport {
 
   constructor(opts: PlanetTransportOpts) {
     this.#opts = opts;
+  }
+
+  /** True after the peer released the call (REL_REQ). receive() then terminates. */
+  get remoteEnded(): boolean {
+    return this.#remoteEnded;
+  }
+
+  get remoteEndReason(): string | undefined {
+    return this.#remoteEndReason;
   }
 
   get audioProfile(): CallAudioProfile | undefined {
@@ -929,6 +941,8 @@ export class PlanetTransport implements CallTransport {
     this.#remoteMediaChanId = 0n;
     this.#targetMid = undefined;
     this.#incomingCall = false;
+    this.#remoteEnded = false;
+    this.#remoteEndReason = undefined;
     this.#autoConnRspDuplicates = false;
     this.#connRspDuplicateInFlight = false;
     this.#localMediaOffer = undefined;
@@ -1127,8 +1141,14 @@ export class PlanetTransport implements CallTransport {
           ).catch(() => {});
         }
         if (msg.cc?.bodyTag === CC_MSG.REL_REQ && msg.cc.bodyBytes) {
+          let relCode: number | undefined;
+          let relPhrase: string | undefined;
+          let releaser: string | undefined;
           try {
             const relReq = decodeCcRelReq(msg.cc.bodyBytes);
+            relCode = relReq.relCode;
+            relPhrase = relReq.relPhrase;
+            releaser = relReq.releaser;
             this.#debug({
               type: "rel_req",
               relCode: relReq.relCode,
@@ -1143,6 +1163,13 @@ export class PlanetTransport implements CallTransport {
             });
           } catch {
             // Keep processing even if a newer REL shape appears.
+          }
+          // Remote hangup (1:1): tear down locally so receive() terminates and
+          // the session layer can end the call. Group REL semantics differ
+          // (roomDestroy / participant release), so leave those untouched.
+          if (!this.#groupJoined) {
+            this.#handleRemoteRelease({ relCode, relPhrase, releaser });
+            return;
           }
         }
         if (msg.cc?.bodyTag === CC_MSG.CONN_REQ && msg.cc.bodyBytes) {
@@ -1530,10 +1557,7 @@ export class PlanetTransport implements CallTransport {
       pathCheck: false,
     };
     const ccBody = wrapCcMsg(CC_MSG.VERIFY_REQ, packCcVerifyReq(verify));
-    const ccMsg = packPlanetCcMsg(
-      { cid, srcChanId: this.#srcChanId, dstChanId: 0n },
-      ccBody,
-    );
+    const ccMsg = packPlanetCcMsg({ cid, srcChanId: this.#srcChanId, dstChanId: 0n }, ccBody);
     await this.#sendEnvelope(
       { kind: "cc", data: ccMsg },
       { bootstrap: true, msgId: ccMsgId(CC_MSG.VERIFY_REQ) },
@@ -2331,6 +2355,40 @@ export class PlanetTransport implements CallTransport {
     );
   }
 
+  /**
+   * Peer-initiated release (REL_REQ). Mirrors close() teardown but never
+   * signals back — the peer already ended the call. Drains RTP waiters so
+   * receive() terminates, and fails pending control waiters so an in-flight
+   * invite()/answer() surfaces the hangup instead of timing out.
+   */
+  #handleRemoteRelease(info: { relCode?: number; relPhrase?: string; releaser?: string }): void {
+    if (this.#remoteEnded) return;
+    this.#remoteEnded = true;
+    const who = [info.releaser, info.relPhrase].filter(Boolean).join(":");
+    const code = typeof info.relCode === "number" ? ` (relCode=${info.relCode})` : "";
+    this.#remoteEndReason = `remote ended the call${code}${who ? `: ${who}` : ""}`;
+    this.#debug({
+      type: "rel_remote_end",
+      relCode: info.relCode,
+      relPhrase: info.relPhrase,
+      releaser: info.releaser,
+    });
+    this.#closed = true;
+    this.#clearKeepalive();
+    if (this.#sock) {
+      const sock = this.#sock;
+      this.#sock = undefined;
+      try {
+        sock.close(() => {});
+      } catch {
+        /* */
+      }
+    }
+    const err = new Error(this.#remoteEndReason);
+    for (const waiter of this.#rtpWaiters.splice(0)) waiter(null);
+    for (const waiter of this.#pending.splice(0)) waiter(err);
+  }
+
   async close(): Promise<void> {
     this.#closed = true;
     this.#clearKeepalive();
@@ -2380,9 +2438,7 @@ export class PlanetTransport implements CallTransport {
     const extensionData = this.#nextAudioRtpExtension();
     const timestamp = this.#nextAudioRtpTimestamp(timestampStep);
     const seq = this.#rtp.seq++ & 0xffff;
-    const payload = this.#groupJoined
-      ? opusPacket
-      : concatBytes([new Uint8Array([0]), opusPacket]);
+    const payload = this.#groupJoined ? opusPacket : concatBytes([new Uint8Array([0]), opusPacket]);
     const rtp = buildRtp({
       payloadType: this.#rtp.payloadType,
       marker: this.#groupJoined && this.#groupAudioExtensionIndex === 3,
@@ -2571,7 +2627,9 @@ export class PlanetTransport implements CallTransport {
           continue;
         }
         const payload =
-          !this.#groupJoined && parsed.payload[0] === 0 ? parsed.payload.subarray(1) : parsed.payload;
+          !this.#groupJoined && parsed.payload[0] === 0
+            ? parsed.payload.subarray(1)
+            : parsed.payload;
         if (payload.length === 0) {
           this.#debug({
             type: "media_ignored",
