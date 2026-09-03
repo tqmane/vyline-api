@@ -21,13 +21,14 @@ export function describeCallRoute(route: LINETypes.CallRoute): "planet" | "andro
 export function pickCallTransport(
   route: LINETypes.CallRoute,
   ctx: CallWireContext,
-  transportOpts?: { callId?: string },
+  transportOpts?: { callId?: string; debug?: (event: Record<string, unknown>) => void },
 ): CallTransport {
   if (ctx.transportKind === "planet") {
     const planetOpts: ConstructorParameters<typeof PlanetTransport>[0] = {
       localMid: ctx.localMid,
       userAgent: ctx.planetUserAgent,
       ...(transportOpts?.callId ? { callId: transportOpts.callId } : {}),
+      ...(transportOpts?.debug ? { debug: transportOpts.debug } : {}),
     };
     if (ctx.planetUserAgent.appReleaseInfo) {
       planetOpts.deviceInfo = ctx.planetUserAgent.appReleaseInfo;
@@ -44,11 +45,23 @@ export function pickCallTransport(
 export function pickCallTransportForClient(
   client: Client,
   route: LINETypes.CallRoute,
-  opts?: { desktopProfile?: DesktopProfile | null; deviceMode?: string; callId?: string },
+  opts?: {
+    desktopProfile?: DesktopProfile | null;
+    deviceMode?: string;
+    callId?: string;
+    debug?: (event: Record<string, unknown>) => void;
+  },
 ): { transport: CallTransport; ctx: CallWireContext } {
   const ctx = buildCallWireContext(client, route, opts);
+  const transportOpts =
+    opts?.callId || opts?.debug
+      ? {
+          ...(opts.callId ? { callId: opts.callId } : {}),
+          ...(opts.debug ? { debug: opts.debug } : {}),
+        }
+      : undefined;
   return {
-    transport: pickCallTransport(route, ctx, opts?.callId ? { callId: opts.callId } : undefined),
+    transport: pickCallTransport(route, ctx, transportOpts),
     ctx,
   };
 }
