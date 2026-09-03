@@ -1173,6 +1173,14 @@ export class PlanetTransport implements CallTransport {
           }
         }
         if (msg.cc?.bodyTag === CC_MSG.CONN_REQ && msg.cc.bodyBytes) {
+          this.#debug({
+            type: "conn_req",
+            bodyBytes: msg.cc.bodyBytes.length,
+            srcChanId: String(msg.cc.hdr?.srcChanId ?? 0n),
+            dstChanId: String(msg.cc.hdr?.dstChanId ?? 0n),
+            autoRsp: this.#autoConnRspDuplicates,
+            rspInFlight: this.#connRspDuplicateInFlight,
+          });
           void this.#sendDuplicateConnRsp(
             incoming as PlanetIncomingMessage & {
               message: ReturnType<typeof decodePlanetMsg>;
@@ -2331,7 +2339,11 @@ export class PlanetTransport implements CallTransport {
     const intervalMs =
       configured ??
       (aliveRptIntervalSec && aliveRptIntervalSec > 0 ? aliveRptIntervalSec * 1000 : undefined);
-    if (!intervalMs || intervalMs <= 0) return;
+    if (!intervalMs || intervalMs <= 0) {
+      this.#debug({ type: "keepalive_disabled" });
+      return;
+    }
+    this.#debug({ type: "keepalive_scheduled", intervalMs });
     const delayMs = Math.max(10, Math.floor(intervalMs));
     const tick = () => {
       if (this.#closed) return;
