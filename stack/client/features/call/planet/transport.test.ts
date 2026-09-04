@@ -531,7 +531,7 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
   const pinholePlainLengths: number[] = [];
   let resolveMedia!: (packet: Uint8Array) => void;
   let resolvePinholeReport!: () => void;
-  let resolveSecondConnRsp!: () => void;
+  let resolveSecondConnRsp!: (hdr?: DecodedPlanetMsgHdr) => void;
   let resolveInfoReq!: (bodyTag: number) => void;
   let resolveInfoRsp!: (bodyTag: number) => void;
   let resolveMcDataRsp!: (rsp: {
@@ -547,7 +547,7 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
   const pinholeReport = new Promise<void>((resolve) => {
     resolvePinholeReport = resolve;
   });
-  const secondConnRsp = new Promise<void>((resolve) => {
+  const secondConnRsp = new Promise<DecodedPlanetMsgHdr | undefined>((resolve) => {
     resolveSecondConnRsp = resolve;
   });
   const infoReq = new Promise<number>((resolve) => {
@@ -590,7 +590,7 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
         const msg = decodePlanetMsg(plain);
         if (msg.cc?.bodyTag === CC_MSG.CONN_RSP) {
           connRspCount++;
-          if (connRspCount >= 2) resolveSecondConnRsp();
+          if (connRspCount >= 2) resolveSecondConnRsp(msg.hdr);
         }
         if (msg.cc?.bodyTag === CC_MSG.INFO_REQ) {
           resolveInfoReq(msg.cc.bodyTag);
@@ -686,9 +686,13 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
     });
     assertEquals(await withTimeout(keepalive, 1000, "keepalive"), 1);
     assert(clientRinfo);
-    assert(connReqWireForRetry);
     await sendUdp(server, connReqWireForRetry, clientRinfo);
-    await withTimeout(secondConnRsp, 1000, "duplicate_conn_rsp");
+    const secondRspHdr = await withTimeout(secondConnRsp, 1000, "duplicate_conn_rsp");
+    assert(secondRspHdr?.tranId);
+    const expectedTranId = new Uint8Array(16);
+    expectedTranId.fill(2); // msgId: 2 in buildControlPlain for connReqPlain
+    assertEquals(secondRspHdr.tranId, expectedTranId);
+    assertEquals(secondRspHdr.rmtNonce, 0x123456n);
     await sendUdp(
       mediaServer,
       new Uint8Array([0x80, 0x60, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]),
