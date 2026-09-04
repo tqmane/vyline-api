@@ -756,7 +756,15 @@ function defaultGroupParticipateCredential(
 }
 
 function isRtpLike(wire: Uint8Array): boolean {
-  return wire.length >= 12 && (wire[0] & 0xc0) === 0x80;
+  if (wire.length < 12 || (wire[0] & 0xc0) !== 0x80) return false;
+  // RFC 5761: RTCP payload types are 200-211 (SR, RR, SDES, BYE, APP, RTPFB, PSFB, etc.)
+  const pt = wire[1];
+  if (pt >= 200 && pt <= 211) return false;
+  return true;
+}
+
+function isRtcpLike(wire: Uint8Array): boolean {
+  return wire.length >= 8 && (wire[0] & 0xc0) === 0x80 && wire[1] >= 200 && wire[1] <= 211;
 }
 
 function firstPort(ports: string | undefined): number | undefined {
@@ -830,6 +838,7 @@ export class PlanetTransport implements CallTransport {
   #groupDataSessionSent = false;
   #groupAudioSsrc?: number;
   #groupAudioExtensionIndex = 0;
+  #audioFramesSent = 0;
   #groupRxAudioSsrc?: number;
   #groupDataSsrc?: number;
   #groupRxDataSsrc?: number;
@@ -955,6 +964,7 @@ export class PlanetTransport implements CallTransport {
     this.#rtp = undefined;
     this.#groupDataRtp = undefined;
     this.#rtpQueue = [];
+    this.#audioFramesSent = 0;
     this.#queued = [];
     this.#clearKeepalive();
     this.#closed = false;
@@ -993,6 +1003,14 @@ export class PlanetTransport implements CallTransport {
         sourceFamily: source?.host.includes(":") ? "ipv6" : source ? "ipv4" : "",
         sourcePort: source?.port,
       });
+      if (isRtcpLike(wire)) {
+        this.#debug({
+          type: "rtcp_recv",
+          bytes: wire.length,
+          payloadType: wire[1],
+        });
+        return;
+      }
       if (this.#srtpRecv && isRtpLike(wire)) {
         this.#debug({
           type: "rtp_recv",
@@ -2531,7 +2549,11 @@ export class PlanetTransport implements CallTransport {
     const extensionData = this.#nextAudioRtpExtension();
     const timestamp = this.#nextAudioRtpTimestamp(timestampStep);
     const seq = this.#rtp.seq++ & 0xffff;
-    const payload = opusPacket;
+    const nativePrefix = this.#groupJoined ? null : (this.#audioFramesSent++ === 0 ? 0x00 : 0x10);
+    const payload =
+      nativePrefix === null
+        ? opusPacket
+        : concatBytes([new Uint8Array([nativePrefix]), opusPacket]);
     const rtp = buildRtp({
       payloadType: this.#rtp.payloadType,
       marker: this.#groupJoined && this.#groupAudioExtensionIndex === 3,
@@ -2719,7 +2741,12 @@ export class PlanetTransport implements CallTransport {
           });
           continue;
         }
-        const payload = parsed.payload;
+        const payload =
+          !this.#groupJoined &&
+          parsed.payload.length > 1 &&
+          (parsed.payload[0] === 0x00 || parsed.payload[0] === 0x10)
+            ? parsed.payload.subarray(1)
+            : parsed.payload;
         if (payload.length === 0) {
           this.#debug({
             type: "media_ignored",
