@@ -531,7 +531,7 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
   const pinholePlainLengths: number[] = [];
   let resolveMedia!: (packet: Uint8Array) => void;
   let resolvePinholeReport!: () => void;
-  let resolveSecondConnRsp!: () => void;
+  let resolveSecondConnRsp!: (hdr?: DecodedPlanetMsgHdr) => void;
   let resolveInfoReq!: (bodyTag: number) => void;
   let resolveInfoRsp!: (bodyTag: number) => void;
   let resolveMcDataRsp!: (rsp: {
@@ -541,13 +541,17 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
   }) => void;
   let resolveRelReq!: (req: { bodyTag: number; dstChanId: string }) => void;
   let resolveKeepalive!: (bodyTag: number) => void;
-  const mediaWire = new Promise<Uint8Array>((resolve) => {
-    resolveMedia = resolve;
-  });
+  const mediaPackets: Uint8Array[] = [];
+  const mediaWaiters: Array<(buf: Uint8Array) => void> = [];
+  const getMediaWire = (): Promise<Uint8Array> => {
+    const queued = mediaPackets.shift();
+    if (queued) return Promise.resolve(queued);
+    return new Promise((res) => mediaWaiters.push(res));
+  };
   const pinholeReport = new Promise<void>((resolve) => {
     resolvePinholeReport = resolve;
   });
-  const secondConnRsp = new Promise<void>((resolve) => {
+  const secondConnRsp = new Promise<DecodedPlanetMsgHdr | undefined>((resolve) => {
     resolveSecondConnRsp = resolve;
   });
   const infoReq = new Promise<number>((resolve) => {
@@ -568,7 +572,10 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
     resolveKeepalive = resolve;
   });
   mediaServer.on("message", (buf: Buffer) => {
-    resolveMedia(new Uint8Array(buf));
+    const arr = new Uint8Array(buf);
+    const waiter = mediaWaiters.shift();
+    if (waiter) waiter(arr);
+    else mediaPackets.push(arr);
   });
   server.on("message", (buf: Buffer, rinfo: RemoteInfo) => {
     try {
@@ -590,7 +597,7 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
         const msg = decodePlanetMsg(plain);
         if (msg.cc?.bodyTag === CC_MSG.CONN_RSP) {
           connRspCount++;
-          if (connRspCount >= 2) resolveSecondConnRsp();
+          if (connRspCount >= 2) resolveSecondConnRsp(msg.hdr);
         }
         if (msg.cc?.bodyTag === CC_MSG.INFO_REQ) {
           resolveInfoReq(msg.cc.bodyTag);
@@ -686,9 +693,13 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
     });
     assertEquals(await withTimeout(keepalive, 1000, "keepalive"), 1);
     assert(clientRinfo);
-    assert(connReqWireForRetry);
     await sendUdp(server, connReqWireForRetry, clientRinfo);
-    await withTimeout(secondConnRsp, 1000, "duplicate_conn_rsp");
+    const secondRspHdr = await withTimeout(secondConnRsp, 1000, "duplicate_conn_rsp");
+    assert(secondRspHdr?.tranId);
+    const expectedTranId = new Uint8Array(16);
+    expectedTranId.fill(2); // msgId: 2 in buildControlPlain for connReqPlain
+    assertEquals(secondRspHdr.tranId, expectedTranId);
+    assertEquals(secondRspHdr.rmtNonce, 0x123456n);
     await sendUdp(
       mediaServer,
       new Uint8Array([0x80, 0x60, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]),
@@ -719,11 +730,18 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
     );
     const opus = new Uint8Array([0x7b, 0x02, 0x11, 0x12, 0x21, 0x22]);
     await transport.send(opus);
-    const receivedWire = await withTimeout(mediaWire, 1000, "media");
+    const receivedWire = await withTimeout(getMediaWire(), 1000, "media");
     const rtp = await srtpDecrypt(peerRecv, receivedWire);
     const sentRtp = parseRtp(rtp);
     assertEquals(sentRtp.payload, opus);
     assertEquals(sentRtp.timestamp, 1920);
+
+    // 2nd frame also sends plain opus
+    await transport.send(opus);
+    const receivedWire2 = await withTimeout(getMediaWire(), 1000, "media2");
+    const rtp2 = await srtpDecrypt(peerRecv, receivedWire2);
+    const sentRtp2 = parseRtp(rtp2);
+    assertEquals(sentRtp2.payload, opus);
 
     const remoteOpus = new Uint8Array([0xf8, 0xff, 0xfd]);
     const unrelatedRtp = buildRtp({
@@ -734,6 +752,8 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
       payload: new Uint8Array([0x11, 0x22]),
     });
     const unrelatedWire = await srtpEncrypt(peerSend, unrelatedRtp);
+    // RTCP packet on same port (RFC 5761 multiplexing) — should be skipped cleanly
+    const rtcpWire = new Uint8Array([0x80, 205, 0x00, 0x03, 0x10, 0x20, 0x30, 0x40, 0, 0, 0, 0]);
     const remoteRtp = buildRtp({
       payloadType: 96,
       seq: 0x3210,
@@ -744,6 +764,7 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
     const remoteWire = await srtpEncrypt(peerSend, remoteRtp);
     const receivedAudio = transport.receive()[Symbol.asyncIterator]().next();
     await sendUdp(mediaServer, unrelatedWire, clientRinfo);
+    await sendUdp(mediaServer, rtcpWire, clientRinfo);
     await sendUdp(mediaServer, remoteWire, clientRinfo);
     const remotePacket = await withTimeout(receivedAudio, 1000, "remote audio");
     assertEquals(remotePacket.value, remoteOpus);

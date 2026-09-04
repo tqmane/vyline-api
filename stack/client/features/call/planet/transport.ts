@@ -756,7 +756,15 @@ function defaultGroupParticipateCredential(
 }
 
 function isRtpLike(wire: Uint8Array): boolean {
-  return wire.length >= 12 && (wire[0] & 0xc0) === 0x80;
+  if (wire.length < 12 || (wire[0] & 0xc0) !== 0x80) return false;
+  // RFC 5761: RTCP payload types are 200-211 (SR, RR, SDES, BYE, APP, RTPFB, PSFB, etc.)
+  const pt = wire[1];
+  if (pt >= 200 && pt <= 211) return false;
+  return true;
+}
+
+function isRtcpLike(wire: Uint8Array): boolean {
+  return wire.length >= 8 && (wire[0] & 0xc0) === 0x80 && wire[1] >= 200 && wire[1] <= 211;
 }
 
 function firstPort(ports: string | undefined): number | undefined {
@@ -830,6 +838,7 @@ export class PlanetTransport implements CallTransport {
   #groupDataSessionSent = false;
   #groupAudioSsrc?: number;
   #groupAudioExtensionIndex = 0;
+  #audioFramesSent = 0;
   #groupRxAudioSsrc?: number;
   #groupDataSsrc?: number;
   #groupRxDataSsrc?: number;
@@ -955,6 +964,7 @@ export class PlanetTransport implements CallTransport {
     this.#rtp = undefined;
     this.#groupDataRtp = undefined;
     this.#rtpQueue = [];
+    this.#audioFramesSent = 0;
     this.#queued = [];
     this.#clearKeepalive();
     this.#closed = false;
@@ -993,6 +1003,14 @@ export class PlanetTransport implements CallTransport {
         sourceFamily: source?.host.includes(":") ? "ipv6" : source ? "ipv4" : "",
         sourcePort: source?.port,
       });
+      if (isRtcpLike(wire)) {
+        this.#debug({
+          type: "rtcp_recv",
+          bytes: wire.length,
+          payloadType: wire[1],
+        });
+        return;
+      }
       if (this.#srtpRecv && isRtpLike(wire)) {
         this.#debug({
           type: "rtp_recv",
@@ -1129,20 +1147,16 @@ export class PlanetTransport implements CallTransport {
           mcTag: msg.mc?.bodyTag ?? 0,
         });
         if (msg.hdr?.sessId?.length) this.#sessId = msg.hdr.sessId;
-        if (msg.hdr?.locNonce !== undefined && !this.#nonceLearned) {
+        if (msg.hdr?.locNonce !== undefined) {
+          if (this.#nonceLearned && msg.hdr.locNonce !== this.#rmtNonce) {
+            this.#debug({
+              type: "nonce_changed",
+              prev: this.#rmtNonce.toString(),
+              next: msg.hdr.locNonce.toString(),
+            });
+          }
           this.#rmtNonce = msg.hdr.locNonce;
           this.#nonceLearned = true;
-        } else if (
-          msg.hdr?.locNonce !== undefined &&
-          this.#nonceLearned &&
-          msg.hdr.locNonce !== this.#rmtNonce
-        ) {
-          // サーバーが nonce を回転させている可能性。後続送信の rmtNonce が古いと捨てられる。
-          this.#debug({
-            type: "nonce_changed",
-            prev: this.#rmtNonce.toString(),
-            next: msg.hdr.locNonce.toString(),
-          });
         }
         if (msg.cc?.bodyTag === CC_MSG.INFO_REQ && msg.cc.bodyBytes) {
           void this.#sendInfoRsp(
@@ -1368,26 +1382,42 @@ export class PlanetTransport implements CallTransport {
     return out;
   }
 
-  #planetHdr(msgId = this.#msgIdCounter++): PlanetMsgHdr {
+  #planetHdr(
+    opts: {
+      msgId?: number;
+      tranId?: Uint8Array;
+      tranSeq?: number;
+      rmtNonce?: bigint;
+    } = {},
+  ): PlanetMsgHdr {
     if (!this.#sessId) throw new Error("connect first");
-    const tranId = new Uint8Array(16);
-    crypto.getRandomValues(tranId);
+    let tranId = opts.tranId;
+    if (!tranId || tranId.length === 0) {
+      tranId = new Uint8Array(16);
+      crypto.getRandomValues(tranId);
+    }
     return {
       userId: this.#opts.localMid,
-      msgId,
+      msgId: opts.msgId ?? this.#msgIdCounter++,
       sessId: this.#sessId,
       tranId,
-      tranSeq: this.#tranSeq++,
+      tranSeq: opts.tranSeq ?? this.#tranSeq++,
       locNonce: this.#locNonce,
-      rmtNonce: this.#rmtNonce,
+      rmtNonce: opts.rmtNonce ?? this.#rmtNonce,
     };
   }
 
   async #sendEnvelope(
     body: { kind: "sc" | "cc" | "mc"; data: Uint8Array },
-    opts: { bootstrap?: boolean; msgId?: number } = {},
+    opts: {
+      bootstrap?: boolean;
+      msgId?: number;
+      tranId?: Uint8Array;
+      tranSeq?: number;
+      rmtNonce?: bigint;
+    } = {},
   ): Promise<void> {
-    const hdr = this.#planetHdr(opts.msgId);
+    const hdr = this.#planetHdr(opts);
     const planetMsg = packPlanetMsg(hdr, body);
     this.#debug({
       type: "send_planet_msg",
@@ -1398,6 +1428,7 @@ export class PlanetTransport implements CallTransport {
       tranSeqBits: hdr.tranSeq.toString(2).length,
       locNonceBits: hdr.locNonce.toString(2).length,
       rmtNoncePresent: hdr.rmtNonce !== 0n,
+      echoTranId: Boolean(opts.tranId),
     });
     await this.#sendTransportPlaintext(planetMsg, {
       bootstrap: opts.bootstrap,
@@ -2144,7 +2175,15 @@ export class PlanetTransport implements CallTransport {
       },
       ccBody,
     );
-    await this.#sendEnvelope({ kind: "cc", data: ccMsg }, { msgId: ccMsgId(CC_MSG.CONN_RSP) });
+    await this.#sendEnvelope(
+      { kind: "cc", data: ccMsg },
+      {
+        msgId: ccMsgId(CC_MSG.CONN_RSP),
+        tranId: request.message.hdr?.tranId,
+        tranSeq: request.message.hdr?.tranSeq,
+        rmtNonce: request.message.hdr?.locNonce,
+      },
+    );
   }
 
   async #sendExchangeAppStrDataInfoReq(
@@ -2214,7 +2253,15 @@ export class PlanetTransport implements CallTransport {
       dstChanIdBits: (request.message.mc?.hdr?.srcChanId ?? this.#remoteMediaChanId).toString(2)
         .length,
     });
-    await this.#sendEnvelope({ kind: "mc", data: mcMsg }, { msgId: CASSINI_MSG_ID_MC_DATA_RSP });
+    await this.#sendEnvelope(
+      { kind: "mc", data: mcMsg },
+      {
+        msgId: CASSINI_MSG_ID_MC_DATA_RSP,
+        tranId: request.message.hdr?.tranId,
+        tranSeq: request.message.hdr?.tranSeq,
+        rmtNonce: request.message.hdr?.locNonce,
+      },
+    );
   }
 
   async #sendMcJoinRsp(
@@ -2236,7 +2283,15 @@ export class PlanetTransport implements CallTransport {
       mcBody,
     );
     this.#debug({ type: "mc_join_rsp_sent" });
-    await this.#sendEnvelope({ kind: "mc", data: mcMsg }, { msgId: CASSINI_MSG_ID_MC_JOIN_RSP });
+    await this.#sendEnvelope(
+      { kind: "mc", data: mcMsg },
+      {
+        msgId: CASSINI_MSG_ID_MC_JOIN_RSP,
+        tranId: request.message.hdr?.tranId,
+        tranSeq: request.message.hdr?.tranSeq,
+        rmtNonce: request.message.hdr?.locNonce,
+      },
+    );
     void this.#sendBepiChannelOpen().catch(() => {});
     void this.#sendMcCheckRpt(request).catch(() => {});
   }
@@ -2260,7 +2315,15 @@ export class PlanetTransport implements CallTransport {
       mcBody,
     );
     this.#debug({ type: "mc_change_rsp_sent" });
-    await this.#sendEnvelope({ kind: "mc", data: mcMsg }, { msgId: CASSINI_MSG_ID_MC_CHANGE_RSP });
+    await this.#sendEnvelope(
+      { kind: "mc", data: mcMsg },
+      {
+        msgId: CASSINI_MSG_ID_MC_CHANGE_RSP,
+        tranId: request.message.hdr?.tranId,
+        tranSeq: request.message.hdr?.tranSeq,
+        rmtNonce: request.message.hdr?.locNonce,
+      },
+    );
   }
 
   async #sendMcCheckRpt(
@@ -2351,7 +2414,15 @@ export class PlanetTransport implements CallTransport {
       },
       ccBody,
     );
-    await this.#sendEnvelope({ kind: "cc", data: ccMsg }, { msgId: ccMsgId(CC_MSG.INFO_RSP) });
+    await this.#sendEnvelope(
+      { kind: "cc", data: ccMsg },
+      {
+        msgId: ccMsgId(CC_MSG.INFO_RSP),
+        tranId: request.message.hdr?.tranId,
+        tranSeq: request.message.hdr?.tranSeq,
+        rmtNonce: request.message.hdr?.locNonce,
+      },
+    );
   }
 
   #clearKeepalive() {
@@ -2478,6 +2549,7 @@ export class PlanetTransport implements CallTransport {
     const extensionData = this.#nextAudioRtpExtension();
     const timestamp = this.#nextAudioRtpTimestamp(timestampStep);
     const seq = this.#rtp.seq++ & 0xffff;
+    this.#audioFramesSent++;
     const payload = opusPacket;
     const rtp = buildRtp({
       payloadType: this.#rtp.payloadType,
@@ -2681,6 +2753,7 @@ export class PlanetTransport implements CallTransport {
           bytes: wire.length,
           payloadBytes: payload.length,
           payloadType: parsed.payloadType,
+          firstByte: payload[0],
           ssrc: parsed.ssrc,
           mediaKeyMode: decrypted.mode,
           mediaKeySwitched: decrypted.switched,
