@@ -2531,7 +2531,7 @@ export class PlanetTransport implements CallTransport {
     const extensionData = this.#nextAudioRtpExtension();
     const timestamp = this.#nextAudioRtpTimestamp(timestampStep);
     const seq = this.#rtp.seq++ & 0xffff;
-    const payload = this.#groupJoined ? opusPacket : concatBytes([new Uint8Array([0]), opusPacket]);
+    const payload = opusPacket;
     const rtp = buildRtp({
       payloadType: this.#rtp.payloadType,
       marker: this.#groupJoined && this.#groupAudioExtensionIndex === 3,
@@ -2719,10 +2719,7 @@ export class PlanetTransport implements CallTransport {
           });
           continue;
         }
-        const payload =
-          !this.#groupJoined && parsed.payload[0] === 0
-            ? parsed.payload.subarray(1)
-            : parsed.payload;
+        const payload = parsed.payload;
         if (payload.length === 0) {
           this.#debug({
             type: "media_ignored",
@@ -2737,6 +2734,7 @@ export class PlanetTransport implements CallTransport {
           bytes: wire.length,
           payloadBytes: payload.length,
           payloadType: parsed.payloadType,
+          firstByte: payload[0],
           ssrc: parsed.ssrc,
           mediaKeyMode: decrypted.mode,
           mediaKeySwitched: decrypted.switched,
