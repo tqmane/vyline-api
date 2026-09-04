@@ -733,15 +733,15 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
     const receivedWire = await withTimeout(getMediaWire(), 1000, "media");
     const rtp = await srtpDecrypt(peerRecv, receivedWire);
     const sentRtp = parseRtp(rtp);
-    assertEquals(sentRtp.payload, concatBytes([new Uint8Array([0]), opus]));
+    assertEquals(sentRtp.payload, opus);
     assertEquals(sentRtp.timestamp, 1920);
 
-    // 2nd frame should use 0x10 prefix
+    // 2nd frame also sends plain opus
     await transport.send(opus);
     const receivedWire2 = await withTimeout(getMediaWire(), 1000, "media2");
     const rtp2 = await srtpDecrypt(peerRecv, receivedWire2);
     const sentRtp2 = parseRtp(rtp2);
-    assertEquals(sentRtp2.payload, concatBytes([new Uint8Array([0x10]), opus]));
+    assertEquals(sentRtp2.payload, opus);
 
     const remoteOpus = new Uint8Array([0xf8, 0xff, 0xfd]);
     const unrelatedRtp = buildRtp({
@@ -759,7 +759,7 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
       seq: 0x3210,
       timestamp: 960,
       ssrc: 0x10203040,
-      payload: concatBytes([new Uint8Array([0x10]), remoteOpus]),
+      payload: remoteOpus,
     });
     const remoteWire = await srtpEncrypt(peerSend, remoteRtp);
     const receivedAudio = transport.receive()[Symbol.asyncIterator]().next();
