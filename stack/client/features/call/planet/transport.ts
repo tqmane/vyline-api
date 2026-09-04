@@ -1132,6 +1132,17 @@ export class PlanetTransport implements CallTransport {
         if (msg.hdr?.locNonce !== undefined && !this.#nonceLearned) {
           this.#rmtNonce = msg.hdr.locNonce;
           this.#nonceLearned = true;
+        } else if (
+          msg.hdr?.locNonce !== undefined &&
+          this.#nonceLearned &&
+          msg.hdr.locNonce !== this.#rmtNonce
+        ) {
+          // サーバーが nonce を回転させている可能性。後続送信の rmtNonce が古いと捨てられる。
+          this.#debug({
+            type: "nonce_changed",
+            prev: this.#rmtNonce.toString(),
+            next: msg.hdr.locNonce.toString(),
+          });
         }
         if (msg.cc?.bodyTag === CC_MSG.INFO_REQ && msg.cc.bodyBytes) {
           void this.#sendInfoRsp(
@@ -1173,6 +1184,22 @@ export class PlanetTransport implements CallTransport {
           }
         }
         if (msg.cc?.bodyTag === CC_MSG.CONN_REQ && msg.cc.bodyBytes) {
+          let connSummary: Record<string, unknown> = {};
+          try {
+            const probe = decodeCcConnReq(msg.cc.bodyBytes);
+            connSummary = {
+              mChanId: String(probe.mChanId ?? 0n),
+              netType: probe.netType,
+              unavailToSec: probe.unavailToSec,
+              hasAnswer: Boolean(probe.answer?.length),
+              answerLen: probe.answer?.length ?? 0,
+              hasOffer: Boolean(probe.offer?.length),
+              offerLen: probe.offer?.length ?? 0,
+              oCapas: probe.oCapas,
+            };
+          } catch {
+            /* mid-call CONN_REQ の差分特定用。デコード失敗でも応答は試みる */
+          }
           this.#debug({
             type: "conn_req",
             bodyBytes: msg.cc.bodyBytes.length,
@@ -1180,6 +1207,7 @@ export class PlanetTransport implements CallTransport {
             dstChanId: String(msg.cc.hdr?.dstChanId ?? 0n),
             autoRsp: this.#autoConnRspDuplicates,
             rspInFlight: this.#connRspDuplicateInFlight,
+            ...connSummary,
           });
           void this.#sendDuplicateConnRsp(
             incoming as PlanetIncomingMessage & {
