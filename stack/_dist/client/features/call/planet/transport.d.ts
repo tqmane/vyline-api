@@ -87,6 +87,9 @@ export interface PlanetLocalMediaOffer {
 export declare class PlanetTransport implements CallTransport {
     #private;
     constructor(opts: PlanetTransportOpts);
+    /** True after the peer released the call (REL_REQ). receive() then terminates. */
+    get remoteEnded(): boolean;
+    get remoteEndReason(): string | undefined;
     get audioProfile(): CallAudioProfile | undefined;
     get localMediaOffer(): PlanetLocalMediaOffer | undefined;
     connect(opts: {
