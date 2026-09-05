@@ -12,6 +12,7 @@ import {
   type EphemeralKeypair,
   generateEphemeralKeypair,
   hmacTag,
+  sha256,
   tagEquals,
   type TransportKeys,
 } from "./crypto.ts";
@@ -38,7 +39,7 @@ import {
   wrapCcMsg,
   wrapMcMsg,
 } from "./schema.ts";
-import { PlanetTransport } from "./transport.ts";
+import { PlanetTransport, unwrapPlanetAudioPayload } from "./transport.ts";
 import { buildRtp, deriveSrtpContext, parseRtp, srtpDecrypt, srtpEncrypt } from "../srtp.ts";
 
 type CallRouteLike = Parameters<PlanetTransport["connect"]>[0]["route"];
@@ -79,6 +80,21 @@ function concatBytes(parts: Uint8Array[]): Uint8Array {
   }
   return out;
 }
+
+function vylineDeviceId(): string {
+  const bytes = new Uint8Array(32);
+  bytes.set(sha256(new TextEncoder().encode("vyline:planet:audio-prefix:v1")).subarray(0, 9));
+  return bytesToBase64(bytes);
+}
+
+Deno.test("Planet audio wrapper leaves unmarked native Opus untouched", () => {
+  const nativeOpus = new Uint8Array([0, 0x91, 0x22]);
+  assertEquals(unwrapPlanetAudioPayload(nativeOpus, false), nativeOpus);
+  assertEquals(
+    unwrapPlanetAudioPayload(new Uint8Array([0, 0xf8, 0xff, 0xfd]), true),
+    new Uint8Array([0xf8, 0xff, 0xfd]),
+  );
+});
 
 function buildBootstrapSecHeader(plaintextLen: number): Uint8Array {
   return new Uint8Array([0, 0, 0, 0x28 | ((plaintextLen >>> 8) & 0x07), plaintextLen & 0xff]);
@@ -341,8 +357,11 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
   const replyLabel = 0x3456;
   const sessId = new Uint8Array(16).fill(0x62);
   let serverSendKeys: TransportKeys | undefined;
+  let advertisedDeviceId: string | undefined;
   const sentCcTags: number[] = [];
   const sentMsgIds: number[] = [];
+  const debugEvents: Record<string, unknown>[] = [];
+  const customDeviceId = bytesToBase64(new Uint8Array(32).fill(0x5a));
 
   const verifyRspPlain = buildControlPlain({
     bodyTag: CC_MSG.VERIFY_RSP,
@@ -351,6 +370,7 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
       oCapas: [1, 2, 7],
       offer: peerOffer,
       oFeatures: [],
+      iDevId: vylineDeviceId(),
     }),
     msgId: 0x2242,
     sessId,
@@ -371,7 +391,9 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
   const transport = new PlanetTransport({
     localMid: "u-local",
     callId: cid,
+    deviceId: customDeviceId,
     timeoutMs: 500,
+    debug: (event) => debugEvents.push(event),
     wireSend(packet, endpoint) {
       if (endpoint.plaintext.length === 519 || endpoint.plaintext.length === 10) return;
       let msg: ReturnType<typeof decodePlanetMsg>;
@@ -393,8 +415,22 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
         // never the outgoing caller SETUP_REQ.
         assertEquals(endpoint.bootstrap, true);
         const verifyFields = decodeFields(msg.cc.bodyBytes!);
-        assertEquals(new TextDecoder().decode(verifyFields.find((f) => f.tag === 1)!.value as Uint8Array), "u-peer");
-        assertEquals(new TextDecoder().decode(verifyFields.find((f) => f.tag === 2)!.value as Uint8Array), "u-local");
+        assertEquals(
+          new TextDecoder().decode(verifyFields.find((f) => f.tag === 1)!.value as Uint8Array),
+          "u-peer",
+        );
+        assertEquals(
+          new TextDecoder().decode(verifyFields.find((f) => f.tag === 2)!.value as Uint8Array),
+          "u-local",
+        );
+        advertisedDeviceId = new TextDecoder().decode(
+          verifyFields.find((f) => f.tag === 6)!.value as Uint8Array,
+        );
+        const decodedDeviceId = Uint8Array.from(atob(advertisedDeviceId), (char) =>
+          char.charCodeAt(0),
+        );
+        assertEquals(decodedDeviceId.length, 32);
+        assertEquals(decodedDeviceId.subarray(9), new Uint8Array(23).fill(0x5a));
         serverSendKeys = deriveCallKeys({
           mpkey: clientPub,
           local: routePeer,
@@ -421,6 +457,7 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
         const conn = decodeCcConnReq(msg.cc.bodyBytes!);
         assert(conn.answer && conn.answer.length > 0);
         assertEquals(conn.mChanId !== undefined, true);
+        assertEquals(conn.devId, advertisedDeviceId);
         return buildServerWire(serverSendKeys, connRspPlain, 0x5102);
       }
     },
@@ -434,6 +471,10 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
   assertEquals(sentCcTags.includes(CC_MSG.SETUP_REQ), false);
   assertEquals(sentCcTags.includes(CC_MSG.CONN_REQ), true);
   assertEquals(sentMsgIds.slice(0, 2), [0x2142, 0x2144]);
+  assertEquals(
+    debugEvents.some((event) => event.type === "peer_audio_prefix" && event.enabled === true),
+    true,
+  );
   await transport.close();
 });
 
@@ -487,6 +528,7 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
       unavailToSec: 120,
       oCapas: [1, 2, 3],
       features: [],
+      devId: vylineDeviceId(),
     }),
     msgId: 2,
     sessId,
@@ -737,12 +779,13 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
       derivePlanetMediaStreamKeying(peerKeys.recvKeying, "AUDIO"),
     );
     const remoteOpus = new Uint8Array([0xf8, 0xff, 0xfd]);
+    const remotePayload = concatBytes([new Uint8Array([0]), remoteOpus]);
     const initialRemoteRtp = buildRtp({
       payloadType: 96,
       seq: 0x320e,
       timestamp: 960,
       ssrc: 0x10203040,
-      payload: remoteOpus,
+      payload: remotePayload,
     });
     const initialRemoteWire = await srtpEncrypt(peerSend, initialRemoteRtp);
     const initialReceivedAudio = transport.receive()[Symbol.asyncIterator]().next();
@@ -796,7 +839,7 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
       seq: 0x3210,
       timestamp: 960,
       ssrc: 0x10203040,
-      payload: remoteOpus,
+      payload: remotePayload,
     });
     const remoteWire = await srtpEncrypt(peerSend, remoteRtp);
     const receivedAudio = transport.receive()[Symbol.asyncIterator]().next();
