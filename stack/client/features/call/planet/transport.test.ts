@@ -35,6 +35,7 @@ import {
   packPlanetCcMsg,
   packPlanetMcMsg,
   packPlanetMsg,
+  packPlanetUserAgent,
   type PlanetSetupOfferMaterial,
   wrapCcMsg,
   wrapMcMsg,
@@ -85,6 +86,16 @@ function vylineDeviceId(): string {
   const bytes = new Uint8Array(32);
   bytes.set(sha256(new TextEncoder().encode("vyline:planet:audio-prefix:v1")).subarray(0, 9));
   return bytesToBase64(bytes);
+}
+
+function vylineAudioPrefixCapability(): string {
+  return bytesToBase64(
+    sha256(new TextEncoder().encode("vyline:planet:audio-prefix:v1")).subarray(0, 9),
+  );
+}
+
+function vylineAudioPrefixWrapper(existing?: string): string {
+  return [existing, `vya1=${vylineAudioPrefixCapability()}`].filter(Boolean).join(";");
 }
 
 Deno.test("Planet audio wrapper leaves unmarked native Opus untouched", () => {
@@ -392,6 +403,12 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
     localMid: "u-local",
     callId: cid,
     deviceId: customDeviceId,
+    userAgent: {
+      osName: "Custom OS",
+      osVersion: "1",
+      deviceName: "Custom device",
+      kitWrapperVersion: "custom-wrapper",
+    },
     timeoutMs: 500,
     debug: (event) => debugEvents.push(event),
     wireSend(packet, endpoint) {
@@ -422,6 +439,13 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
         assertEquals(
           new TextDecoder().decode(verifyFields.find((f) => f.tag === 2)!.value as Uint8Array),
           "u-local",
+        );
+        const advertisedUa = verifyFields.find((f) => f.tag === 5)!.value as Uint8Array;
+        assertEquals(
+          new TextDecoder().decode(
+            decodeFields(advertisedUa).find((f) => f.tag === 9)!.value as Uint8Array,
+          ),
+          vylineAudioPrefixWrapper("custom-wrapper"),
         );
         advertisedDeviceId = new TextDecoder().decode(
           verifyFields.find((f) => f.tag === 6)!.value as Uint8Array,
@@ -528,7 +552,12 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
       unavailToSec: 120,
       oCapas: [1, 2, 3],
       features: [],
-      devId: vylineDeviceId(),
+      ua: packPlanetUserAgent({
+        osName: "Android",
+        osVersion: "36",
+        deviceName: "Android",
+        kitWrapperVersion: vylineAudioPrefixWrapper("native-wrapper"),
+      }),
     }),
     msgId: 2,
     sessId,
