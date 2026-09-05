@@ -123,6 +123,29 @@ Deno.test("CallSession.start is idempotent", async () => {
   assertEquals(r1, r2);
 });
 
+Deno.test("CallSession.start closes the transport when signaling fails", async () => {
+  const { client } = fakeClient();
+  let closeCalls = 0;
+  const transport: CallTransport = {
+    connect() {
+      return Promise.reject(new Error("connect failed"));
+    },
+    close() {
+      closeCalls++;
+      return Promise.resolve();
+    },
+    send() {},
+    async *receive() {},
+  };
+  const session = new CallSession(client, { to: "u-p", transport });
+
+  await assertRejects(() => session.start(), Error, "connect failed");
+  await session.end("dismiss-failed-call");
+
+  assertEquals(session.state, "failed");
+  assertEquals(closeCalls, 1);
+});
+
 Deno.test("CallSession.start answers an incoming call without acquiring or inviting", async () => {
   const { client, acquired, fakeRoute } = fakeClient();
   let answered = 0;
@@ -363,6 +386,52 @@ Deno.test("CallSession.end transitions to ending → ended + emits 'ended'", asy
   assertEquals(states, ["ending", "ended"]);
   assertEquals(endedReason, "hung-up");
   assert(transport.closed);
+});
+
+Deno.test("CallSession.end shares cleanup across concurrent callers", async () => {
+  const { client } = fakeClient();
+  let transportCloseCalls = 0;
+  let encoderCloseCalls = 0;
+  let decoderCloseCalls = 0;
+  const transport: CallTransport = {
+    connect: () => Promise.resolve(),
+    close() {
+      transportCloseCalls++;
+      return Promise.resolve();
+    },
+    send() {},
+    async *receive() {},
+  };
+  const codecs: CodecFactory = {
+    newEncoder(): AudioEncoder {
+      return {
+        encode: () => new Uint8Array([1]),
+        close: () => encoderCloseCalls++,
+      };
+    },
+    newDecoder(): AudioDecoder {
+      return {
+        decode: () => null,
+        close: () => decoderCloseCalls++,
+      };
+    },
+  };
+  const session = new CallSession(client, { to: "u-p", transport, codecs });
+  await session.start();
+  await session.sendStream(bufferSource({ samples: new Int16Array(960), sampleRate: 48000 }));
+  await session.received().next();
+  const endedReasons: string[] = [];
+  session.on("ended", (reason) => endedReasons.push(reason));
+
+  const first = session.end("first");
+  const second = session.end("second");
+  assert(first === second);
+  await Promise.all([first, second]);
+
+  assertEquals(transportCloseCalls, 1);
+  assertEquals(encoderCloseCalls, 1);
+  assertEquals(decoderCloseCalls, 1);
+  assertEquals(endedReasons, ["first"]);
 });
 
 Deno.test("stub transport throws on connect", async () => {
