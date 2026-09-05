@@ -342,6 +342,7 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
   const sessId = new Uint8Array(16).fill(0x62);
   let serverSendKeys: TransportKeys | undefined;
   const sentCcTags: number[] = [];
+  const sentMsgIds: number[] = [];
 
   const verifyRspPlain = buildControlPlain({
     bodyTag: CC_MSG.VERIFY_RSP,
@@ -351,7 +352,7 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
       offer: peerOffer,
       oFeatures: [],
     }),
-    msgId: 0x2142,
+    msgId: 0x2242,
     sessId,
     locNonce: 0x123456n,
     cid,
@@ -379,7 +380,10 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
       } catch {
         return;
       }
-      if (msg.cc?.bodyTag !== undefined) sentCcTags.push(msg.cc.bodyTag);
+      if (msg.cc?.bodyTag !== undefined) {
+        sentCcTags.push(msg.cc.bodyTag);
+        sentMsgIds.push(msg.hdr?.msgId ?? 0);
+      }
       if (msg.cc?.bodyTag === CC_MSG.VERIFY_REQ) {
         assertEquals(msg.cc.hdr?.cid, cid);
         const clientPub = extractBootstrapClientPub(packet);
@@ -429,6 +433,7 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
   assertEquals(sentCcTags[0], CC_MSG.VERIFY_REQ);
   assertEquals(sentCcTags.includes(CC_MSG.SETUP_REQ), false);
   assertEquals(sentCcTags.includes(CC_MSG.CONN_REQ), true);
+  assertEquals(sentMsgIds.slice(0, 2), [0x2142, 0x2144]);
   await transport.close();
 });
 
@@ -839,7 +844,7 @@ Deno.test("PlanetTransport ends media on remote REL_REQ (peer hangup)", async ()
       offer: peerOffer,
       oFeatures: [],
     }),
-    msgId: 0x2142,
+    msgId: 0x2242,
     sessId,
     locNonce: 0x123456n,
     cid,

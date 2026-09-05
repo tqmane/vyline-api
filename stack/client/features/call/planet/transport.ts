@@ -319,6 +319,8 @@ const BOOTSTRAP_SEC_HEADER_LEN = 5;
 const BOOTSTRAP_CIPHER_OFFSET = HEADER_LEN + BOOTSTRAP_PREFIX_LEN + BOOTSTRAP_SEC_HEADER_LEN;
 const CASSINI_MSG_ID_CC_BASE = 0x2140;
 const CASSINI_MSG_ID_SETUP_REQ = 0x2141;
+const CASSINI_MSG_ID_VERIFY_REQ = 0x2142;
+const CASSINI_MSG_ID_CONN_REQ = 0x2144;
 const CASSINI_MSG_ID_REL_REQ = 0x2145;
 const CASSINI_MSG_ID_GROUP_PARTICIPATE_REQ = 0x214e;
 const CASSINI_MSG_ID_MC_JOIN_RSP = 0x3285;
@@ -1637,7 +1639,7 @@ export class PlanetTransport implements CallTransport {
     const ccMsg = packPlanetCcMsg({ cid, srcChanId: this.#srcChanId, dstChanId: 0n }, ccBody);
     await this.#sendEnvelope(
       { kind: "cc", data: ccMsg },
-      { bootstrap: true, msgId: ccMsgId(CC_MSG.VERIFY_REQ) },
+      { bootstrap: true, msgId: CASSINI_MSG_ID_VERIFY_REQ },
     );
     this.#setupSent = true;
   }
@@ -1669,7 +1671,7 @@ export class PlanetTransport implements CallTransport {
       },
       ccBody,
     );
-    await this.#sendEnvelope({ kind: "cc", data: ccMsg }, { msgId: ccMsgId(CC_MSG.CONN_REQ) });
+    await this.#sendEnvelope({ kind: "cc", data: ccMsg }, { msgId: CASSINI_MSG_ID_CONN_REQ });
     return connReq;
   }
 
