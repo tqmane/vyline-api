@@ -337,6 +337,7 @@ const VYLINE_AUDIO_PREFIX_DEVICE_ID_MAGIC = sha256(
 const VYLINE_AUDIO_PREFIX_DEVICE_ID_PREFIX = btoa(
   String.fromCharCode(...VYLINE_AUDIO_PREFIX_DEVICE_ID_MAGIC),
 );
+const VYLINE_AUDIO_PREFIX_UA_TOKEN = `vya1=${VYLINE_AUDIO_PREFIX_DEVICE_ID_PREFIX}`;
 const REGULAR_TAIL_CONTROL_BASE = 0x18;
 const REGULAR_TAIL_RAW_BASE = 0x48;
 const PINHOLE_PROBE_COUNT = 16;
@@ -514,6 +515,21 @@ function markVylineDeviceId(deviceId: string): string {
 
 function usesVylineAudioPrefix(deviceId: string | undefined): boolean {
   return deviceId?.length === 44 && deviceId.startsWith(VYLINE_AUDIO_PREFIX_DEVICE_ID_PREFIX);
+}
+
+function userAgentUsesVylineAudioPrefix(userAgent: Uint8Array | undefined): boolean {
+  if (!userAgent) return false;
+  try {
+    const marker = decodeFields(userAgent).find(
+      (field) => field.tag === 9 && field.value instanceof Uint8Array,
+    )?.value;
+    return (
+      marker instanceof Uint8Array &&
+      new TextDecoder().decode(marker).split(";").includes(VYLINE_AUDIO_PREFIX_UA_TOKEN)
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function unwrapPlanetAudioPayload(payload: Uint8Array, prefixed: boolean): Uint8Array {
@@ -934,6 +950,16 @@ export class PlanetTransport implements CallTransport {
     } catch {
       /* debug hooks must never affect transport */
     }
+  }
+
+  #planetUserAgent(direct: boolean): PlanetUserAgent {
+    const userAgent = this.#opts.userAgent ?? defaultAndroidUserAgent(this.#opts.deviceInfo);
+    if (!direct) return userAgent;
+    const existing = userAgent.kitWrapperVersion;
+    const kitWrapperVersion = existing?.split(";").includes(VYLINE_AUDIO_PREFIX_UA_TOKEN)
+      ? existing
+      : [existing, VYLINE_AUDIO_PREFIX_UA_TOKEN].filter(Boolean).join(";");
+    return { ...userAgent, kitWrapperVersion };
   }
 
   get localMediaOffer(): PlanetLocalMediaOffer | undefined {
@@ -1591,9 +1617,7 @@ export class PlanetTransport implements CallTransport {
       responder: opts.to,
       iZone: this.#route.iZone,
       rZone: this.#route.rZone,
-      ua: packPlanetUserAgent(
-        this.#opts.userAgent ?? defaultAndroidUserAgent(this.#opts.deviceInfo),
-      ),
+      ua: packPlanetUserAgent(this.#planetUserAgent(true)),
       devId: this.#directDeviceId,
       commTypeFlags: 1,
       capas: this.#opts.capabilities ?? [1, 2, 3, 6, 7],
@@ -1654,9 +1678,7 @@ export class PlanetTransport implements CallTransport {
       responder: this.#opts.localMid,
       iZone: this.#route.iZone,
       rZone: this.#route.rZone,
-      ua: packPlanetUserAgent(
-        this.#opts.userAgent ?? defaultAndroidUserAgent(this.#opts.deviceInfo),
-      ),
+      ua: packPlanetUserAgent(this.#planetUserAgent(true)),
       devId: this.#directDeviceId,
       commTypeFlags: 1,
       capas: this.#opts.capabilities ?? [1, 2, 3, 6, 7],
@@ -1690,9 +1712,7 @@ export class PlanetTransport implements CallTransport {
       unavailToSec: 120,
       oCapas: this.#opts.capabilities ?? [1, 2, 3, 6, 7],
       features: this.#opts.features ?? defaultSetupFeatures(),
-      ua: packPlanetUserAgent(
-        this.#opts.userAgent ?? defaultAndroidUserAgent(this.#opts.deviceInfo),
-      ),
+      ua: packPlanetUserAgent(this.#planetUserAgent(true)),
       devId: this.#directDeviceId,
       reqRec: false,
     };
@@ -1779,9 +1799,7 @@ export class PlanetTransport implements CallTransport {
       xZone: route.rZone,
       orionIp: route.orionIp,
       mixIp: route.mixIp,
-      ua: packPlanetUserAgent(
-        this.#opts.userAgent ?? defaultAndroidUserAgent(this.#opts.deviceInfo),
-      ),
+      ua: packPlanetUserAgent(this.#planetUserAgent(false)),
       devId: this.#deviceId,
       commTypeFlags: 1,
       capas: this.#opts.capabilities ?? [1, 2, 3, 6, 4, 5],
@@ -2002,7 +2020,8 @@ export class PlanetTransport implements CallTransport {
     const connReqBytes = reply.message.cc?.bodyBytes;
     if (!connReqBytes) throw new Error("PLANET conn_req missing body");
     const connReq = decodeCcConnReq(connReqBytes);
-    this.#peerUsesAudioPrefix = usesVylineAudioPrefix(connReq.devId);
+    this.#peerUsesAudioPrefix =
+      usesVylineAudioPrefix(connReq.devId) || userAgentUsesVylineAudioPrefix(connReq.ua);
     this.#debug({ type: "peer_audio_prefix", enabled: this.#peerUsesAudioPrefix });
     const peerAnswerOffer = tryDecodeNativeSetupOffer(connReq.answer);
     const peerOffer = tryDecodeNativeSetupOffer(connReq.offer);
