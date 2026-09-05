@@ -436,6 +436,7 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
   const routePeer = generateEphemeralKeypair();
   const server = await bindUdpServer();
   const mediaServer = await bindUdpServer();
+  const debugEvents: Record<string, unknown>[] = [];
   const addr = server.address();
   const mediaAddr = mediaServer.address();
   const port = typeof addr === "string" ? 0 : addr.port;
@@ -445,6 +446,7 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
     localMid: "u-local",
     timeoutMs: 1000,
     keepaliveIntervalMs: 20,
+    debug: (event) => debugEvents.push(event),
   });
 
   const peerMedia = generateEphemeralKeypair();
@@ -706,6 +708,7 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
       clientRinfo,
     );
     await new Promise((resolve) => setTimeout(resolve, 10));
+    assertEquals(debugEvents.filter((event) => event.type === "media_endpoint_learned").length, 0);
 
     const localMedia = transport.localMediaOffer;
     assert(localMedia);
@@ -728,22 +731,51 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
     const peerSend = await deriveSrtpContext(
       derivePlanetMediaStreamKeying(peerKeys.recvKeying, "AUDIO"),
     );
+    const remoteOpus = new Uint8Array([0xf8, 0xff, 0xfd]);
+    const initialRemoteRtp = buildRtp({
+      payloadType: 96,
+      seq: 0x320e,
+      timestamp: 960,
+      ssrc: 0x10203040,
+      payload: remoteOpus,
+    });
+    const initialRemoteWire = await srtpEncrypt(peerSend, initialRemoteRtp);
+    const initialReceivedAudio = transport.receive()[Symbol.asyncIterator]().next();
+    await sendUdp(mediaServer, initialRemoteWire, clientRinfo);
+    assertEquals(
+      (await withTimeout(initialReceivedAudio, 1000, "initial remote audio")).value,
+      remoteOpus,
+    );
+    assertEquals(debugEvents.filter((event) => event.type === "media_endpoint_learned").length, 1);
+
+    const unexpectedPayloadRtp = buildRtp({
+      payloadType: 101,
+      seq: 0x320f,
+      timestamp: 0,
+      ssrc: 0x10203040,
+      payload: new Uint8Array([0x11, 0x22]),
+    });
+    await sendUdp(server, await srtpEncrypt(peerSend, unexpectedPayloadRtp), clientRinfo);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assertEquals(debugEvents.filter((event) => event.type === "media_endpoint_learned").length, 1);
+
     const opus = new Uint8Array([0x7b, 0x02, 0x11, 0x12, 0x21, 0x22]);
     await transport.send(opus);
     const receivedWire = await withTimeout(getMediaWire(), 1000, "media");
     const rtp = await srtpDecrypt(peerRecv, receivedWire);
     const sentRtp = parseRtp(rtp);
-    assertEquals(sentRtp.payload, opus);
-    assertEquals(sentRtp.timestamp, 1920);
+    assertEquals(sentRtp.payload, concatBytes([new Uint8Array([0]), opus]));
+    assertEquals(sentRtp.timestamp, 960);
 
-    // 2nd frame also sends plain opus
+    // LINE's 1:1 PLANET receiver expects the native 0-byte before every
+    // 20 ms Opus packet. Peer audio in the opposite direction remains raw Opus.
     await transport.send(opus);
     const receivedWire2 = await withTimeout(getMediaWire(), 1000, "media2");
     const rtp2 = await srtpDecrypt(peerRecv, receivedWire2);
     const sentRtp2 = parseRtp(rtp2);
-    assertEquals(sentRtp2.payload, opus);
+    assertEquals(sentRtp2.payload, concatBytes([new Uint8Array([0]), opus]));
+    assertEquals(sentRtp2.timestamp, 1920);
 
-    const remoteOpus = new Uint8Array([0xf8, 0xff, 0xfd]);
     const unrelatedRtp = buildRtp({
       payloadType: 101,
       seq: 0x320f,

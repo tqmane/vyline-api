@@ -93,6 +93,7 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
   #decoder?: AudioDecoder;
   #sendAbort?: AbortController;
   #receiveSink?: AudioSink;
+  #endTask?: Promise<void>;
 
   constructor(client: Client, opts: CallSessionOpts) {
     super();
@@ -154,6 +155,11 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
       this.emit("connected", this.#route);
       return this.#route;
     } catch (e) {
+      try {
+        await this.#transport.close();
+      } catch {
+        /* preserve the signaling error */
+      }
       this.#setState("failed");
       const err = e instanceof Error ? e : new Error(String(e));
       this.emit("error", err);
@@ -263,20 +269,26 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
     }
   }
 
-  async end(reason = "user-ended"): Promise<void> {
-    if (this.#state === "ended" || this.#state === "idle") return;
-    this.#setState("ending");
-    this.#sendAbort?.abort();
-    try {
-      await this.#transport.close();
-    } catch {
-      /* */
+  end(reason = "user-ended"): Promise<void> {
+    if (this.#endTask) return this.#endTask;
+    if (this.#state === "ended" || this.#state === "failed" || this.#state === "idle") {
+      return Promise.resolve();
     }
-    this.#encoder?.close?.();
-    this.#decoder?.close?.();
-    await this.#receiveSink?.end?.();
-    this.#setState("ended");
-    this.emit("ended", reason);
+    this.#endTask = Promise.resolve().then(async () => {
+      this.#setState("ending");
+      this.#sendAbort?.abort();
+      try {
+        await this.#transport.close();
+      } catch {
+        /* */
+      }
+      this.#encoder?.close?.();
+      this.#decoder?.close?.();
+      await this.#receiveSink?.end?.();
+      this.#setState("ended");
+      this.emit("ended", reason);
+    });
+    return this.#endTask;
   }
 }
 

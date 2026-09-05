@@ -234,6 +234,11 @@ interface MediaKeyCandidate {
   recvContext: SrtpCryptoContext;
 }
 
+interface RtpDatagram {
+  packet: Uint8Array;
+  source: { host: string; port: number } | undefined;
+}
+
 const MEDIA_KEY_SELECTIONS: Record<MediaKdfMode, MediaKeySelection> = {
   current: {
     mode: "current",
@@ -829,8 +834,8 @@ export class PlanetTransport implements CallTransport {
     timestamp: number;
     index: number;
   };
-  #rtpQueue: Uint8Array[] = [];
-  #rtpWaiters: Array<(packet: Uint8Array | null) => void> = [];
+  #rtpQueue: RtpDatagram[] = [];
+  #rtpWaiters: Array<(packet: RtpDatagram | null) => void> = [];
   #keepaliveTimer?: ReturnType<typeof setTimeout>;
   #srcChanId = 1n;
   #setupSent = false;
@@ -838,7 +843,6 @@ export class PlanetTransport implements CallTransport {
   #groupDataSessionSent = false;
   #groupAudioSsrc?: number;
   #groupAudioExtensionIndex = 0;
-  #audioFramesSent = 0;
   #groupRxAudioSsrc?: number;
   #groupDataSsrc?: number;
   #groupRxDataSsrc?: number;
@@ -884,10 +888,7 @@ export class PlanetTransport implements CallTransport {
   get audioProfile(): CallAudioProfile | undefined {
     if (this.#groupJoined) return undefined;
     return {
-      frameDurationMs: 40,
-      bitrate: 16000,
-      bandwidth: "fullband" as const,
-      signal: "voice" as const,
+      frameDurationMs: 20,
       vbr: false,
     };
   }
@@ -964,7 +965,6 @@ export class PlanetTransport implements CallTransport {
     this.#rtp = undefined;
     this.#groupDataRtp = undefined;
     this.#rtpQueue = [];
-    this.#audioFramesSent = 0;
     this.#queued = [];
     this.#clearKeepalive();
     this.#closed = false;
@@ -1012,10 +1012,11 @@ export class PlanetTransport implements CallTransport {
         return;
       }
       if (this.#srtpRecv && isRtpLike(wire)) {
+        const payloadType = wire[1] & 0x7f;
         this.#debug({
           type: "rtp_recv",
           bytes: wire.length,
-          payloadType: wire[1] & 0x7f,
+          payloadType,
           marker: (wire[1] & 0x80) !== 0,
           seq: wire.length >= 4 ? (wire[2] << 8) | wire[3] : undefined,
           ssrc:
@@ -1023,8 +1024,16 @@ export class PlanetTransport implements CallTransport {
               ? ((wire[8] << 24) | (wire[9] << 16) | (wire[10] << 8) | wire[11]) >>> 0
               : undefined,
         });
-        this.#updateRtpEndpointFromSource(source);
-        this.#enqueueRtp(wire);
+        if (this.#rtp && payloadType !== this.#rtp.payloadType) {
+          this.#debug({
+            type: "media_ignored",
+            reason: "unexpected_payload_type",
+            payloadType,
+            expectedPayloadType: this.#rtp.payloadType,
+          });
+          return;
+        }
+        this.#enqueueRtp(wire, source);
         return;
       }
       if (wire.length < HEADER_LEN + 16) {
@@ -1242,10 +1251,11 @@ export class PlanetTransport implements CallTransport {
     }
   }
 
-  #enqueueRtp(packet: Uint8Array) {
+  #enqueueRtp(packet: Uint8Array, source?: { host: string; port: number }) {
     const waiter = this.#rtpWaiters.shift();
-    if (waiter) waiter(packet);
-    else this.#rtpQueue.push(packet);
+    const datagram = { packet, source };
+    if (waiter) waiter(datagram);
+    else this.#rtpQueue.push(datagram);
   }
 
   #updateRtpEndpointFromSource(source: { host: string; port: number } | undefined) {
@@ -1272,7 +1282,7 @@ export class PlanetTransport implements CallTransport {
     });
   }
 
-  #takeRtp(): Promise<Uint8Array | null> {
+  #takeRtp(): Promise<RtpDatagram | null> {
     const queued = this.#rtpQueue.shift();
     if (queued) return Promise.resolve(queued);
     return new Promise((resolve) => this.#rtpWaiters.push(resolve));
@@ -2544,13 +2554,13 @@ export class PlanetTransport implements CallTransport {
     if (!this.#srtpSend || !this.#rtp) {
       throw new Error("PlanetTransport.send: media not established");
     }
-    const timestampStep =
-      opts.timestampStep ?? this.#opts.rtpTimestampStep ?? (this.#groupJoined ? 960 : 1920);
+    const timestampStep = opts.timestampStep ?? this.#opts.rtpTimestampStep ?? 960;
     const extensionData = this.#nextAudioRtpExtension();
     const timestamp = this.#nextAudioRtpTimestamp(timestampStep);
     const seq = this.#rtp.seq++ & 0xffff;
-    this.#audioFramesSent++;
-    const payload = opusPacket;
+    const payload = this.#groupJoined
+      ? opusPacket
+      : concatBytes([new Uint8Array([0]), opusPacket]);
     const rtp = buildRtp({
       payloadType: this.#rtp.payloadType,
       marker: this.#groupJoined && this.#groupAudioExtensionIndex === 3,
@@ -2566,6 +2576,7 @@ export class PlanetTransport implements CallTransport {
       type: "media_send",
       bytes: wire.length,
       payloadBytes: payload.length,
+      firstByte: payload[0],
       payloadType: this.#rtp.payloadType,
       marker: (rtp[1] & 0x80) !== 0,
       ssrc: this.#rtp.ssrc,
@@ -2584,9 +2595,9 @@ export class PlanetTransport implements CallTransport {
         port: this.#rtp.port,
         bootstrap: false,
         seq: this.#rtp.seq,
-        plainLen: opusPacket.length,
+        plainLen: payload.length,
         bodyLen: wire.length,
-        plaintext: opusPacket,
+        plaintext: payload,
       });
       await this.#sendGroupDataRtpControl();
       await this.#sendGroupRtcpFeedback();
@@ -2723,8 +2734,9 @@ export class PlanetTransport implements CallTransport {
       throw new Error("PlanetTransport.receive: media not established");
     }
     while (true) {
-      const wire = await this.#takeRtp();
-      if (!wire) return;
+      const datagram = await this.#takeRtp();
+      if (!datagram) return;
+      const { packet: wire, source } = datagram;
       try {
         const decrypted = await this.#decryptMediaRtp(wire);
         const parsed = parseRtp(decrypted.rtp);
@@ -2738,6 +2750,7 @@ export class PlanetTransport implements CallTransport {
           });
           continue;
         }
+        this.#updateRtpEndpointFromSource(source);
         const payload = parsed.payload;
         if (payload.length === 0) {
           this.#debug({
