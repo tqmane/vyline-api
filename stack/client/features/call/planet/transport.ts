@@ -330,6 +330,13 @@ const CASSINI_MSG_ID_MC_DATA_REQ = 0x3189;
 const CASSINI_MSG_ID_MC_DATA_RSP = 0x3289;
 const CASSINI_MSG_ID_KEEPALIVE_REQ = 0x1101;
 const CASSINI_MSG_ID_BEPI_OPEN = 0x1102;
+// Opaque capability tag inside a native-shaped 32-byte base64 direct-call device ID.
+const VYLINE_AUDIO_PREFIX_DEVICE_ID_MAGIC = sha256(
+  new TextEncoder().encode("vyline:planet:audio-prefix:v1"),
+).subarray(0, 9);
+const VYLINE_AUDIO_PREFIX_DEVICE_ID_PREFIX = btoa(
+  String.fromCharCode(...VYLINE_AUDIO_PREFIX_DEVICE_ID_MAGIC),
+);
 const REGULAR_TAIL_CONTROL_BASE = 0x18;
 const REGULAR_TAIL_RAW_BASE = 0x48;
 const PINHOLE_PROBE_COUNT = 16;
@@ -490,6 +497,27 @@ function regularTail16(plaintextLen: number, raw: boolean): number {
 function randomBase64(byteLength: number): string {
   const bytes = crypto.getRandomValues(new Uint8Array(byteLength));
   return btoa(String.fromCharCode(...bytes));
+}
+
+function markVylineDeviceId(deviceId: string): string {
+  let bytes: Uint8Array | undefined;
+  try {
+    const decoded = atob(deviceId);
+    if (decoded.length === 32) bytes = Uint8Array.from(decoded, (char) => char.charCodeAt(0));
+  } catch {
+    /* hash the caller-supplied identifier below */
+  }
+  bytes ??= sha256(new TextEncoder().encode(deviceId));
+  bytes.set(VYLINE_AUDIO_PREFIX_DEVICE_ID_MAGIC);
+  return btoa(String.fromCharCode(...bytes));
+}
+
+function usesVylineAudioPrefix(deviceId: string | undefined): boolean {
+  return deviceId?.length === 44 && deviceId.startsWith(VYLINE_AUDIO_PREFIX_DEVICE_ID_PREFIX);
+}
+
+export function unwrapPlanetAudioPayload(payload: Uint8Array, prefixed: boolean): Uint8Array {
+  return prefixed && payload.length > 1 && payload[0] === 0 ? payload.subarray(1) : payload;
 }
 
 function defaultAndroidUserAgent(deviceInfo?: string): PlanetUserAgent {
@@ -804,6 +832,8 @@ function bridgeInfoAddr(bytes: Uint8Array | undefined): PlanetAddr | undefined {
 
 export class PlanetTransport implements CallTransport {
   #opts: PlanetTransportOpts;
+  #deviceId: string;
+  #directDeviceId: string;
   #sock?: DgramSocket;
   #route?: CallRouteParsed;
   #local?: EphemeralKeypair;
@@ -860,6 +890,7 @@ export class PlanetTransport implements CallTransport {
   #closed = true;
   #autoConnRspDuplicates = false;
   #connRspDuplicateInFlight = false;
+  #peerUsesAudioPrefix = false;
 
   // Per-msg sequence + protocol state
   #nextSeq = 0x01d0;
@@ -876,6 +907,8 @@ export class PlanetTransport implements CallTransport {
 
   constructor(opts: PlanetTransportOpts) {
     this.#opts = opts;
+    this.#deviceId = opts.deviceId ?? randomBase64(32);
+    this.#directDeviceId = markVylineDeviceId(this.#deviceId);
   }
 
   /** True after the peer released the call (REL_REQ). receive() then terminates. */
@@ -957,6 +990,7 @@ export class PlanetTransport implements CallTransport {
     this.#remoteEndReason = undefined;
     this.#autoConnRspDuplicates = false;
     this.#connRspDuplicateInFlight = false;
+    this.#peerUsesAudioPrefix = false;
     this.#localMediaOffer = undefined;
     this.#srtpSend = undefined;
     this.#srtpRecv = undefined;
@@ -1560,7 +1594,7 @@ export class PlanetTransport implements CallTransport {
       ua: packPlanetUserAgent(
         this.#opts.userAgent ?? defaultAndroidUserAgent(this.#opts.deviceInfo),
       ),
-      devId: this.#opts.deviceId ?? randomBase64(32),
+      devId: this.#directDeviceId,
       commTypeFlags: 1,
       capas: this.#opts.capabilities ?? [1, 2, 3, 6, 7],
       // Native LINE sends a 311-byte structured media/security offer here.
@@ -1623,7 +1657,7 @@ export class PlanetTransport implements CallTransport {
       ua: packPlanetUserAgent(
         this.#opts.userAgent ?? defaultAndroidUserAgent(this.#opts.deviceInfo),
       ),
-      devId: this.#opts.deviceId ?? randomBase64(32),
+      devId: this.#directDeviceId,
       commTypeFlags: 1,
       capas: this.#opts.capabilities ?? [1, 2, 3, 6, 7],
       credential:
@@ -1659,7 +1693,7 @@ export class PlanetTransport implements CallTransport {
       ua: packPlanetUserAgent(
         this.#opts.userAgent ?? defaultAndroidUserAgent(this.#opts.deviceInfo),
       ),
-      devId: this.#opts.deviceId ?? randomBase64(32),
+      devId: this.#directDeviceId,
       reqRec: false,
     };
     const ccBody = wrapCcMsg(CC_MSG.CONN_REQ, packCcConnReq(connReq));
@@ -1685,6 +1719,8 @@ export class PlanetTransport implements CallTransport {
     const verifyBytes = verifyReply.message.cc?.bodyBytes;
     if (!verifyBytes) throw new Error("PLANET verify_rsp missing body");
     const verifyRsp = decodeCcVerifyRsp(verifyBytes);
+    this.#peerUsesAudioPrefix = usesVylineAudioPrefix(verifyRsp.iDevId);
+    this.#debug({ type: "peer_audio_prefix", enabled: this.#peerUsesAudioPrefix });
     if ((verifyRsp.result ?? 0) !== 0 || (verifyRsp.relCode ?? 0) !== 0) {
       throw new Error(
         `PLANET verify rejected (${verifyRsp.result ?? 0}/${verifyRsp.relCode ?? 0})${
@@ -1746,7 +1782,7 @@ export class PlanetTransport implements CallTransport {
       ua: packPlanetUserAgent(
         this.#opts.userAgent ?? defaultAndroidUserAgent(this.#opts.deviceInfo),
       ),
-      devId: this.#opts.deviceId ?? randomBase64(32),
+      devId: this.#deviceId,
       commTypeFlags: 1,
       capas: this.#opts.capabilities ?? [1, 2, 3, 6, 4, 5],
       offer,
@@ -1966,6 +2002,8 @@ export class PlanetTransport implements CallTransport {
     const connReqBytes = reply.message.cc?.bodyBytes;
     if (!connReqBytes) throw new Error("PLANET conn_req missing body");
     const connReq = decodeCcConnReq(connReqBytes);
+    this.#peerUsesAudioPrefix = usesVylineAudioPrefix(connReq.devId);
+    this.#debug({ type: "peer_audio_prefix", enabled: this.#peerUsesAudioPrefix });
     const peerAnswerOffer = tryDecodeNativeSetupOffer(connReq.answer);
     const peerOffer = tryDecodeNativeSetupOffer(connReq.offer);
     const mediaReady = await this.#configureMedia(peerAnswerOffer ?? peerOffer, connReq);
@@ -2560,9 +2598,7 @@ export class PlanetTransport implements CallTransport {
     const extensionData = this.#nextAudioRtpExtension();
     const timestamp = this.#nextAudioRtpTimestamp(timestampStep);
     const seq = this.#rtp.seq++ & 0xffff;
-    const payload = this.#groupJoined
-      ? opusPacket
-      : concatBytes([new Uint8Array([0]), opusPacket]);
+    const payload = this.#groupJoined ? opusPacket : concatBytes([new Uint8Array([0]), opusPacket]);
     const rtp = buildRtp({
       payloadType: this.#rtp.payloadType,
       marker: this.#groupJoined && this.#groupAudioExtensionIndex === 3,
@@ -2763,6 +2799,9 @@ export class PlanetTransport implements CallTransport {
           });
           continue;
         }
+        // Native peers send raw Opus; Vyline peers identify the LINE-required wrapper explicitly.
+        const stripPrefix =
+          !this.#groupJoined && this.#peerUsesAudioPrefix && payload.length > 1 && payload[0] === 0;
         this.#debug({
           type: "media_recv",
           bytes: wire.length,
@@ -2772,8 +2811,9 @@ export class PlanetTransport implements CallTransport {
           ssrc: parsed.ssrc,
           mediaKeyMode: decrypted.mode,
           mediaKeySwitched: decrypted.switched,
+          prefixStripped: stripPrefix,
         });
-        yield payload;
+        yield unwrapPlanetAudioPayload(payload, stripPrefix);
       } catch (e) {
         this.#debug({
           type: "media_decrypt_fail",
