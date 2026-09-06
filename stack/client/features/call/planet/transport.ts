@@ -2083,9 +2083,15 @@ export class PlanetTransport implements CallTransport {
     }
     if (this.#mediaKeyCandidates.length === 0) return false;
     const requestedMode =
-      this.#opts.mediaKeyMode ??
-      (this.#groupJoined ? "audio-secret-sender" : "audio-reverse-stage");
-    const initialMode = requestedMode === "auto" ? "current" : requestedMode;
+      this.#opts.mediaKeyMode ?? (this.#groupJoined ? "audio-secret-sender" : "auto");
+    // Peers can choose either advertised security scheme. Preserve the known
+    // ECDH start, then select another candidate only after SRTP authentication.
+    const initialMode =
+      requestedMode === "auto"
+        ? this.#mediaKeyCandidates.some((c) => c.mode === "audio-reverse-stage")
+          ? "audio-reverse-stage"
+          : "audio-secret-sender"
+        : requestedMode;
     const initial = this.#mediaKeyCandidates.find((c) => c.mode === initialMode);
     if (!initial) return false;
     this.#srtpSend = initial.sendContext;

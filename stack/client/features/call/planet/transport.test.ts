@@ -31,6 +31,7 @@ import {
   packCcSetupRsp,
   packCcVerifyRsp,
   packMcDataReq,
+  packNativeGroupParticipateOffer,
   packNativeSetupOffer,
   packPlanetCcMsg,
   packPlanetMcMsg,
@@ -479,7 +480,7 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
   await transport.close();
 });
 
-Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", async () => {
+async function testPeerAudio(peerSecurity: "ecdh" | "simple" | "simple-only") {
   const routePeer = generateEphemeralKeypair();
   const server = await bindUdpServer();
   const mediaServer = await bindUdpServer();
@@ -523,7 +524,10 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
   const connReqPlain = buildControlPlain({
     bodyTag: CC_MSG.CONN_REQ,
     bodyBytes: packCcConnReq({
-      answer: packNativeSetupOffer(peerMaterial),
+      answer:
+        peerSecurity === "simple-only"
+          ? packNativeGroupParticipateOffer({ mediaSecret: peerMaterial.mediaSecret })
+          : packNativeSetupOffer(peerMaterial),
       mChanId: 0x2002n,
       netType: 1,
       unavailToSec: 120,
@@ -779,10 +783,16 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
       },
     });
     const peerRecv = await deriveSrtpContext(
-      derivePlanetMediaStreamKeying(peerKeys.sendKeying, "AUDIO"),
+      derivePlanetMediaStreamKeying(
+        peerSecurity === "ecdh" ? peerKeys.sendKeying : localMedia.material.mediaSecret,
+        "AUDIO",
+      ),
     );
     const peerSend = await deriveSrtpContext(
-      derivePlanetMediaStreamKeying(peerKeys.recvKeying, "AUDIO"),
+      derivePlanetMediaStreamKeying(
+        peerSecurity === "ecdh" ? peerKeys.recvKeying : peerMaterial.mediaSecret,
+        "AUDIO",
+      ),
     );
     const remoteOpus = new Uint8Array([0xf8, 0xff, 0xfd]);
     const remotePayload = new Uint8Array([0x70, 0xf9, 0xff, 0xfd]);
@@ -801,6 +811,10 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
       remoteOpus,
     );
     assertEquals(debugEvents.filter((event) => event.type === "media_endpoint_learned").length, 1);
+    assertEquals(
+      debugEvents.filter((event) => event.type === "media_key_selected").map((event) => event.mode),
+      peerSecurity === "simple" ? ["audio-secret-sender"] : [],
+    );
 
     const unexpectedPayloadRtp = buildRtp({
       payloadType: 101,
@@ -866,7 +880,14 @@ Deno.test("PlanetTransport learns RTP source and sends decryptable SRTP media", 
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await new Promise<void>((resolve) => mediaServer.close(() => resolve()));
   }
-});
+}
+
+Deno.test("PlanetTransport authenticates ECDH audio before selecting keys and endpoint", () =>
+  testPeerAudio("ecdh"));
+Deno.test("PlanetTransport authenticates simple audio before selecting keys and endpoint", () =>
+  testPeerAudio("simple"));
+Deno.test("PlanetTransport supports a peer selecting only the simple security scheme", () =>
+  testPeerAudio("simple-only"));
 
 Deno.test("PlanetTransport ends media on remote REL_REQ (peer hangup)", async () => {
   const routePeer = generateEphemeralKeypair();
