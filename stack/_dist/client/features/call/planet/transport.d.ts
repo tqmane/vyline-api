@@ -84,7 +84,6 @@ export interface PlanetLocalMediaOffer {
     material: PlanetSetupOfferMaterial;
     offer: Uint8Array;
 }
-export declare function unwrapPlanetAudioPayload(payload: Uint8Array, prefixed: boolean): Uint8Array;
 export declare class PlanetTransport implements CallTransport {
     #private;
     constructor(opts: PlanetTransportOpts);
