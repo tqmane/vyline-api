@@ -332,7 +332,10 @@ function packDataOffer(codec: Uint8Array, path: Uint8Array): Uint8Array {
  * blobs. Dynamic cryptographic material is supplied by the caller so tests can
  * be deterministic.
  */
-export function packNativeSetupOffer(material: PlanetSetupOfferMaterial): Uint8Array {
+export function packNativeSetupOffer(
+  material: PlanetSetupOfferMaterial,
+  selectedCrypto?: "e2ee" | "simple",
+): Uint8Array {
   if (material.mediaPubKey.length !== 33) {
     throw new Error("packNativeSetupOffer: mediaPubKey must be 33 bytes");
   }
@@ -387,8 +390,10 @@ export function packNativeSetupOffer(material: PlanetSetupOfferMaterial): Uint8A
   emitMessage(out, 1, audio);
   emitMessage(out, 1, video);
   emitMessage(out, 1, data);
-  emitMessage(out, 2, finalize(secA));
-  emitMessage(out, 2, finalize(secB));
+  // Offers may list alternatives. Native ignores ALL crypto in an answer
+  // unless it contains exactly one selected scheme (Windows RVA 0xe6f60).
+  if (selectedCrypto !== "simple") emitMessage(out, 2, finalize(secA));
+  if (selectedCrypto !== "e2ee") emitMessage(out, 2, finalize(secB));
   emitMessage(out, 3, finalize(version));
   return finalize(out);
 }
@@ -1924,7 +1929,9 @@ export interface NativeSetupMediaRecord {
   bitrate?: number;
   kind?: number;
   rtpId?: number;
+  /** Native local_srcid (SSRC), despite the legacy property name. */
   rtpPort?: number;
+  /** Native remote_srcid (SSRC), despite the legacy property name. */
   rtcpId?: number;
   raw: Uint8Array;
 }

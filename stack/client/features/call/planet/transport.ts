@@ -1697,7 +1697,30 @@ export class PlanetTransport implements CallTransport {
     }
     this.#remoteCcChanId = verifyReply.message.cc?.hdr?.srcChanId ?? this.#remoteCcChanId;
     const peerOffer = tryDecodeNativeSetupOffer(verifyRsp.offer);
-    const mediaReady = await this.#configureMedia(peerOffer, {
+    const selectedCrypto =
+      peerOffer?.mediaPubKey?.length === 33 &&
+      peerOffer.mediaNonce?.length === 16 &&
+      peerOffer.mediaKeyId !== undefined
+        ? "e2ee"
+        : peerOffer?.mediaSecret?.length === 30
+          ? "simple"
+          : undefined;
+    if (!selectedCrypto || !this.#localMediaOffer) {
+      throw new Error("PLANET peer offers no supported encrypted media scheme");
+    }
+    this.#localMediaOffer.offer = packNativeSetupOffer(
+      this.#localMediaOffer.material,
+      selectedCrypto,
+    );
+    // Candidate authentication must stay inside the selected crypto family.
+    const negotiatedPeer = { ...peerOffer! };
+    if (selectedCrypto === "e2ee") delete negotiatedPeer.mediaSecret;
+    else {
+      delete negotiatedPeer.mediaPubKey;
+      delete negotiatedPeer.mediaKeyId;
+      delete negotiatedPeer.mediaNonce;
+    }
+    const mediaReady = await this.#configureMedia(negotiatedPeer, {
       answer: verifyRsp.offer,
       netType: 1,
       unavailToSec: 120,
@@ -2125,6 +2148,11 @@ export class PlanetTransport implements CallTransport {
     const audio =
       peerOffer.media.find((m) => m.name === "A" && m.enabled !== 0 && m.rtpId !== undefined) ??
       peerOffer.media.find((m) => m.kind === 1 && m.enabled !== 0 && m.rtpId !== undefined);
+    // The answerer's local_srcid is the caller's RX stream. Using the peer's
+    // remote_srcid here hits its TX stream and native drops it before decoding.
+    const answeredAudio = this.#incomingCall
+      ? decodeNativeSetupOffer(local.offer).media.find((m) => m.name === "A")
+      : undefined;
     if (this.#groupJoined) {
       this.#groupRtcpSsrc = GROUP_RTCP_SENDER_SSRC;
     }
@@ -2134,7 +2162,7 @@ export class PlanetTransport implements CallTransport {
       payloadType: audio?.rtpId ?? 96,
       ssrc:
         (this.#groupJoined ? this.#groupAudioSsrc : undefined) ??
-        audio?.rtcpId ??
+        (this.#incomingCall ? answeredAudio?.rtpPort : audio?.rtcpId) ??
         audio?.rtpPort ??
         randomU32(),
       seq: randomIntInclusive(0, 0xffff),
