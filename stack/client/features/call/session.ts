@@ -121,6 +121,7 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
   #groupMixer?: GroupAudioMixer;
   #participants?: ConferenceMember[];
   #groupAudioSources = new Set<number>();
+  #groupVideoReady = new Set<string>();
   #localVideoEnabled = false;
   #remoteVideoEnabled = false;
   #remoteVideoPaused = false;
@@ -150,9 +151,18 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
         ...m,
         sources: m.sources.map((s) => ({ ...s })),
       }));
+      for (const mid of this.#groupVideoReady)
+        if (!members.some((m) => m.mid === mid && m.sources.some((s) => s.name === "V")))
+          this.#groupVideoReady.delete(mid);
+      const videoEnabled = this.#groupVideoReady.size > 0;
+      if (this.#remoteVideoEnabled !== videoEnabled) {
+        this.#remoteVideoEnabled = videoEnabled;
+        this.emit("video", this.videoState);
+      }
       this.emit("participants", this.participants!);
     };
     this.#transport.onVideoState = (enabled) => {
+      if (this.#opts.group) return; // Group pause/leave is scoped through conference sources.
       this.#remoteVideoPaused = !enabled;
       if (!enabled) this.#remoteVideoNeedsKey = true;
       this.#remoteVideoEnabled = enabled;
@@ -204,6 +214,22 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
     if (this.#state !== "in-call" || !this.#transport.receiveVideo) return;
     for await (const frame of this.#transport.receiveVideo()) {
       if (this.#state !== "in-call") return;
+      if (this.#opts.group) {
+        const mid = frame.sourceMid;
+        if (
+          !mid ||
+          !this.#participants?.some((m) => m.mid === mid && m.sources.some((s) => s.name === "V"))
+        )
+          continue;
+        if (!this.#groupVideoReady.has(mid) && !frame.key) continue;
+        this.#groupVideoReady.add(mid);
+        if (!this.#remoteVideoEnabled) {
+          this.#remoteVideoEnabled = true;
+          this.emit("video", this.videoState);
+        }
+        yield frame;
+        continue;
+      }
       if (this.#remoteVideoPaused) continue;
       if (this.#remoteVideoNeedsKey && !frame.key) continue;
       this.#remoteVideoNeedsKey = false;
@@ -433,6 +459,7 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
       this.#decoder?.close?.();
       this.#groupMixer?.close();
       this.#groupAudioSources.clear();
+      this.#groupVideoReady.clear();
       if (this.#opts.group) {
         this.#participants = [];
         this.emit("participants", []);

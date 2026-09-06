@@ -173,6 +173,48 @@ Deno.test("CallSession does not show delayed video after peer camera pause", asy
   await session.end();
 });
 
+Deno.test("group video needs a key per member and drops departed sources without pausing others", async () => {
+  const members = [1, 2].map((i) => ({
+    mid: `u${String(i).repeat(32)}`,
+    connected: true,
+    mediaFlags: 3,
+    sources: [{ name: "V", ssrc: i }],
+  }));
+  const frame = (index: number, key: boolean, timestamp: number) => ({
+    sourceMid: members[index].mid,
+    data: new Uint8Array([1]),
+    key,
+    timestamp,
+  });
+  const transport: CallTransport = {
+    ...recordingTransport(),
+    videoAvailable: true,
+    async joinGroup() {},
+    async *receiveAudio() {},
+    async *receiveVideo() {
+      transport.onConference?.(members);
+      yield frame(0, true, 0);
+      yield frame(1, false, 1);
+      yield frame(1, true, 2);
+      transport.onConference?.(members.slice(1));
+      yield frame(0, true, 3);
+      yield frame(1, false, 4);
+      transport.onConference?.([]);
+    },
+  };
+  const session = new CallSession(fakeClient().client, {
+    to: `c${"1".repeat(32)}`,
+    transport,
+    group: { route: {} as never },
+  });
+  await session.start();
+  const timestamps: number[] = [];
+  for await (const item of session.receivedVideo()) timestamps.push(item.timestamp);
+  assertEquals(timestamps, [0, 2, 4]);
+  assertEquals(session.videoState.remoteEnabled, false);
+  await session.end();
+});
+
 Deno.test("CallSession.start closes the transport when signaling fails", async () => {
   const { client } = fakeClient();
   let closeCalls = 0;
@@ -297,7 +339,7 @@ Deno.test("group session PCM uses simultaneous playout and closes its receive pu
     async close() {
       finish();
     },
-    async *receive() {
+    receive() {
       throw new Error("Group audio must not flatten speakers");
     },
     async *receiveAudio() {
@@ -351,8 +393,8 @@ Deno.test("group participant departures discard their buffered and late audio", 
   });
   const codecs = passthroughCodecs();
   const encoder = codecs.newEncoder({ sampleRate: 48000, channels: 1 });
-  let created = 0,
-    closed = 0;
+  let created = 0;
+  let closed = 0;
   const transport: CallTransport = {
     ...recordingTransport(),
     async joinGroup() {
