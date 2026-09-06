@@ -935,7 +935,7 @@ async function testPeerAudio(peerSecurity: "ecdh" | "simple" | "simple-only", vi
     assertEquals(remotePacket.value, remoteOpus);
     if (video) {
       assertEquals(transport.videoAvailable, true);
-      const avcc = new Uint8Array([0, 0, 0, 4, 0x65, 0x88, 0x84, 0]);
+      const vp8 = new Uint8Array([0x30, 0, 0, 0x9d, 1, 0x2a, 0x80, 2, 0x68, 1, 0, 0]);
       const peerVideoRecv = await deriveSrtpContext(
         derivePlanetMediaStreamKeying(
           peerSecurity === "ecdh" ? peerKeys.sendKeying : localMedia.material.mediaSecret,
@@ -949,12 +949,12 @@ async function testPeerAudio(peerSecurity: "ecdh" | "simple" | "simple-only", vi
         ),
       );
       await transport.setVideoEnabled(true);
-      await transport.sendVideo({ data: avcc, key: true, timestamp: 9000 });
+      await transport.sendVideo({ data: vp8, key: true, timestamp: 9000 });
       const sentVideo = parseRtp(
         await srtpDecrypt(peerVideoRecv, await withTimeout(getMediaWire(), 1000, "video send")),
       );
       assertEquals([sentVideo.payloadType, sentVideo.ssrc, sentVideo.timestamp], [97, 211, 9000]);
-      assertEquals(new Evs3Assembler().push(sentVideo)?.data, avcc);
+      assertEquals(new Evs3Assembler().push(sentVideo)?.data, vp8);
       const videoIterator = transport.receiveVideo()[Symbol.asyncIterator]();
       const gotVideo = videoIterator.next();
       const simultaneousAudio = transport.receive()[Symbol.asyncIterator]().next();
@@ -964,20 +964,20 @@ async function testPeerAudio(peerSecurity: "ecdh" | "simple" | "simple-only", vi
         seq: 20,
         timestamp: 9000,
         marker: true,
-        payload: packetizeEvs3(avcc, true, 1)[0],
+        payload: packetizeEvs3(vp8, true, 1)[0],
       });
       const wrongKeyVideo = await srtpEncrypt(peerSend, incomingVideo);
       await sendUdp(mediaServer, wrongKeyVideo, clientRinfo);
       await sendUdp(mediaServer, await srtpEncrypt(peerVideoSend, incomingVideo), clientRinfo);
       await sendUdp(mediaServer, remoteWire, clientRinfo);
-      assertEquals((await withTimeout(gotVideo, 1000, "video receive")).value?.data, avcc);
+      assertEquals((await withTimeout(gotVideo, 1000, "video receive")).value?.data, vp8);
       assertEquals(
         (await withTimeout(simultaneousAudio, 1000, "audio while video")).value,
         remoteOpus,
       );
       await transport.setVideoEnabled(false);
       await assertRejects(
-        () => transport.sendVideo({ data: avcc, key: true, timestamp: 12000 }),
+        () => transport.sendVideo({ data: vp8, key: true, timestamp: 12000 }),
         Error,
         "not enabled",
       );

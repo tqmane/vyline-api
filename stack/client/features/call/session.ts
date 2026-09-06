@@ -109,6 +109,8 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
   #endTask?: Promise<void>;
   #localVideoEnabled = false;
   #remoteVideoEnabled = false;
+  #remoteVideoPaused = false;
+  #remoteVideoNeedsKey = true;
 
   constructor(client: Client, opts: CallSessionOpts) {
     super();
@@ -117,6 +119,8 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
     this.#transport = opts.transport ?? stubTransport;
     this.#codecs = opts.codecs ?? defaultCodecFactory;
     this.#transport.onVideoState = (enabled) => {
+      this.#remoteVideoPaused = !enabled;
+      if (!enabled) this.#remoteVideoNeedsKey = true;
       this.#remoteVideoEnabled = enabled;
       this.emit("video", this.videoState);
     };
@@ -163,6 +167,9 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
     if (this.#state !== "in-call" || !this.#transport.receiveVideo) return;
     for await (const frame of this.#transport.receiveVideo()) {
       if (this.#state !== "in-call") return;
+      if (this.#remoteVideoPaused) continue;
+      if (this.#remoteVideoNeedsKey && !frame.key) continue;
+      this.#remoteVideoNeedsKey = false;
       if (!this.#remoteVideoEnabled) {
         this.#remoteVideoEnabled = true;
         this.emit("video", this.videoState);

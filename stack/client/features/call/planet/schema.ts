@@ -335,7 +335,7 @@ function packDataOffer(codec: Uint8Array, path: Uint8Array): Uint8Array {
 export function packNativeSetupOffer(
   material: PlanetSetupOfferMaterial,
   selectedCrypto?: "e2ee" | "simple",
-  avcVideo?: { enabled: boolean },
+  videoState?: { enabled: boolean },
 ): Uint8Array {
   if (material.mediaPubKey.length !== 33) {
     throw new Error("packNativeSetupOffer: mediaPubKey must be 33 bytes");
@@ -359,11 +359,11 @@ export function packNativeSetupOffer(
   const video = packAudioVideoOffer(
     "V",
     packOfferCodec("V", {
-      enabled: Number(avcVideo?.enabled ?? false),
+      enabled: Number(videoState?.enabled ?? false),
       bitrate: 800,
       fps: 24,
       profile: 2,
-      kind: avcVideo ? 3 : 2,
+      kind: 2,
     }),
     videoPath,
     111,

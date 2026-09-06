@@ -73,7 +73,7 @@ export interface PlanetSetupOfferMaterial {
  * blobs. Dynamic cryptographic material is supplied by the caller so tests can
  * be deterministic.
  */
-export declare function packNativeSetupOffer(material: PlanetSetupOfferMaterial, selectedCrypto?: "e2ee" | "simple", avcVideo?: {
+export declare function packNativeSetupOffer(material: PlanetSetupOfferMaterial, selectedCrypto?: "e2ee" | "simple", videoState?: {
     enabled: boolean;
 }): Uint8Array;
 export interface PlanetGroupParticipateOfferMaterial {

@@ -1,27 +1,37 @@
-// PLANET_RTP AVC, Windows ampkit 1.0.0.911: PD maker 0x9a86c0,
-// AVC packer 0x249260 / depacker 0x242730. This is not RFC 6184 FU-A.
-export const MAX_VIDEO_FRAME_BYTES = 1024 * 1024;
+// PLANET_RTP normal-video (EVS3_VP8), Windows ampkit 1.0.0.911:
+// PD maker 0x9a86c0, VP8 packer 0x248bd0 / depacker 0x241c90.
+export const MAX_VIDEO_FRAME_BYTES = 0x3ffff - 3;
 
 export interface EncodedVideoFrame {
-  /** A complete AVCC access unit, including in-band SPS/PPS on key pictures. */
+  /** A complete raw VP8 frame (not IVF or RFC 7741 payloads). */
   data: Uint8Array;
   key: boolean;
   /** Unsigned 90 kHz RTP timestamp. */
   timestamp: number;
+  rotation?: number;
 }
 
-export function validateAvcc(data: Uint8Array): void {
-  if (!data.length || data.length > MAX_VIDEO_FRAME_BYTES) throw new Error("Invalid AVC size");
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  let offset = 0;
-  while (offset < data.length) {
-    if (offset + 4 > data.length) throw new Error("Truncated AVC length");
-    const length = view.getUint32(offset);
-    offset += 4;
-    if (length < 2 || length > data.length - offset) throw new Error("Invalid AVC NAL length");
-    const nal = data[offset];
-    if (nal & 0x80 || (nal & 31) < 1 || (nal & 31) > 23) throw new Error("Unsupported AVC NAL");
-    offset += length;
+export function validateVp8(data: Uint8Array, expectedKey?: boolean): void {
+  if (data.length < 4 || data.length > MAX_VIDEO_FRAME_BYTES) throw new Error("Invalid VP8 size");
+  // RFC 6386 sections 9.1 and 19.1, checked before either native/browser decoder.
+  const tag = data[0] | (data[1] << 8) | (data[2] << 16);
+  const key = !(tag & 1);
+  const headerBytes = key ? 10 : 3;
+  const partitionBytes = tag >>> 5;
+  if (
+    ((tag >>> 1) & 7) > 3 || !partitionBytes ||
+    partitionBytes >= data.length - headerBytes ||
+    (expectedKey !== undefined && key !== expectedKey)
+  ) throw new Error("Invalid VP8 header");
+  if (key) {
+    const width = data[6] | ((data[7] & 63) << 8);
+    const height = data[8] | ((data[9] & 63) << 8);
+    const scale = [1, 5 / 4, 5 / 3, 2];
+    const displayWidth = Math.ceil(width * scale[data[7] >>> 6]);
+    const displayHeight = Math.ceil(height * scale[data[9] >>> 6]);
+    if (data[3] !== 0x9d || data[4] !== 1 || data[5] !== 0x2a ||
+      !width || !height || displayWidth > 1280 || displayHeight > 1280 ||
+      displayWidth * displayHeight > 1280 * 720) throw new Error("Unsupported VP8 dimensions");
   }
 }
 
@@ -31,7 +41,7 @@ export function packetizeEvs3(
   pictureId: number,
   fragmentBytes = 1000,
 ): Uint8Array[] {
-  validateAvcc(data);
+  validateVp8(data, key);
   if (
     !Number.isInteger(fragmentBytes) ||
     fragmentBytes < 1 ||
@@ -49,6 +59,10 @@ export function packetizeEvs3(
         : [0xfa, pictureId >>> 8, pictureId, 0, 3, 1, 0, 0]
       : [0x80, pictureId >>> 8, pictureId];
     if (end) header[0] |= 4;
+    if (begin) {
+      const length = data.length + 3;
+      header.push(length & 3, (length >>> 2) & 255, (length >>> 10) & 255);
+    }
     const body = data.subarray(offset, offset + fragmentBytes);
     const packet = new Uint8Array(header.length + body.length);
     packet.set(header);
@@ -72,7 +86,7 @@ export function parseEvs3(payload: Uint8Array) {
   if (begin && (flags & 0x2a) !== 0x2a) throw new Error("EVS3 first descriptor incomplete");
   if (flags & 0x20) {
     const layer = read();
-    // ponytail: single-layer AVC only; negotiate a layered decoder before accepting SVC.
+    // ponytail: single-layer VP8 only; negotiate a layered decoder before accepting SVC.
     if (layer & 0xee) throw new Error("Unsupported EVS3 layer");
     if ((flags & 0x50) === 0x50) {
       let reference = read();
@@ -110,6 +124,8 @@ interface Picture {
   start: number;
   end?: number;
   key: boolean;
+  rotation: number;
+  expectedBytes: number;
   since: number;
   bytes: number;
   fragments: Map<number, Uint8Array>;
@@ -216,6 +232,8 @@ export class Evs3Assembler {
         timestamp: packet.timestamp,
         start: packet.seq,
         key: pd.key,
+        rotation: pd.rotation,
+        expectedBytes: 0,
         since: now,
         bytes: 0,
         fragments: new Map(),
@@ -248,7 +266,16 @@ export class Evs3Assembler {
         throw new Error("Contradictory EVS3 end");
       picture.end = index;
     }
-    picture.bytes += packet.payload.length - pd.offset;
+    const bodyOffset = pd.offset + (pd.begin ? 3 : 0);
+    if (pd.begin) {
+      if (bodyOffset >= packet.payload.length || packet.payload[pd.offset] > 3)
+        throw new Error("Invalid EVS3 VP8 length prefix");
+      picture.expectedBytes = (packet.payload[pd.offset] |
+        (packet.payload[pd.offset + 1] << 2) | (packet.payload[pd.offset + 2] << 10)) - 3;
+      if (picture.expectedBytes < 4 || picture.expectedBytes > MAX_VIDEO_FRAME_BYTES)
+        throw new Error("Invalid EVS3 VP8 frame size");
+    }
+    picture.bytes += packet.payload.length - bodyOffset;
     if (picture.bytes > MAX_VIDEO_FRAME_BYTES) throw new Error("EVS3 picture too large");
     picture.fragments.set(index, packet.payload.slice());
     if (picture.end === undefined || picture.fragments.size !== picture.end + 1) return;
@@ -256,14 +283,16 @@ export class Evs3Assembler {
     let offset = 0;
     for (let i = 0; i <= picture.end; i++) {
       const fragment = picture.fragments.get(i)!;
-      const body = fragment.subarray(parseEvs3(fragment).offset);
+      const body = fragment.subarray(parseEvs3(fragment).offset + (i === 0 ? 3 : 0));
       data.set(body, offset);
       offset += body.length;
     }
-    validateAvcc(data);
+    if (data.length !== picture.expectedBytes) throw new Error("EVS3 VP8 length mismatch");
+    validateVp8(data, picture.key);
     this.#lastSequence = (picture.start + picture.end) & 0xffff;
     this.#picture = undefined;
     this.#needsKey = false;
-    return { data, key: picture.key, timestamp: picture.timestamp };
+    return { data, key: picture.key, timestamp: picture.timestamp,
+      ...(picture.rotation ? { rotation: picture.rotation } : {}) };
   }
 }

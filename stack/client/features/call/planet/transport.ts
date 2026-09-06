@@ -2082,6 +2082,7 @@ export class PlanetTransport implements CallTransport {
     const local = this.#localMediaOffer;
     const route = this.#route;
     if (!local || !route) return false;
+    this.#debug({type:"media_streams", streams:peerOffer.media.map(({name,enabled,kind,kinds,rtpId,rtpPort,rtcpId})=>({name,enabled,kind,kinds,rtpId,rtpPort,rtcpId}))});
     this.#mediaKeyCandidates = [];
     const addCandidate = async (
       mode: MediaKeyCandidate["mode"],
@@ -2230,12 +2231,12 @@ export class PlanetTransport implements CallTransport {
       seq: randomIntInclusive(0, 0xffff),
       timestamp: 0,
     };
-    const video = peerOffer.media.find((m) => m.name === "V" && (m.kinds ?? [m.kind]).includes(3));
+    const video = peerOffer.media.find((m) => m.name === "V" && (m.kinds ?? [m.kind]).includes(2));
     const localVideo = decodeNativeSetupOffer(local.offer).media.find((m) => m.name === "V");
     if (
       !this.#groupJoined &&
       video &&
-      localVideo?.kinds?.includes(3) &&
+      localVideo?.kinds?.includes(2) &&
       video.rtpId !== undefined &&
       video.rtpId > 0 &&
       video.rtpId < 128 &&
@@ -2251,7 +2252,7 @@ export class PlanetTransport implements CallTransport {
         pictureId: 0,
       };
     }
-    if (this.#initialVideo && !this.#videoRtp) throw new Error("Peer does not support AVC video");
+    if (this.#initialVideo && !this.#videoRtp) throw new Error("Peer does not support VP8 video");
     if (this.#groupDataSrtpSend) {
       this.#groupDataRtp = {
         ssrc: this.#groupDataSsrc ?? addU32(this.#rtp.ssrc, 0x30),

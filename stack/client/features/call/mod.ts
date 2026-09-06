@@ -15,7 +15,7 @@ export type {
   CallTransport,
   CallVideoState,
 } from "./session.js";
-export { type EncodedVideoFrame, MAX_VIDEO_FRAME_BYTES, validateAvcc } from "./planet/evs3.js";
+export { type EncodedVideoFrame, MAX_VIDEO_FRAME_BYTES, validateVp8 } from "./planet/evs3.js";
 export {
   type AudioDecoder,
   type AudioEncoder,

@@ -50,7 +50,7 @@ import {
   wrapMcMsg,
 } from "./schema.ts";
 
-Deno.test("AVC-only offer preserves audio and marks initial video separately", () => {
+Deno.test("VP8 normal-video offer preserves audio and marks initial video separately", () => {
   const material = {
     mediaPubKey: new Uint8Array(33),
     mediaKeyId: 1,
@@ -63,7 +63,7 @@ Deno.test("AVC-only offer preserves audio and marks initial video separately", (
       offer.media.map((m) => [m.name, m.enabled, m.kinds]),
       [
         ["A", 1, [1]],
-        ["V", Number(enabled), [3]],
+        ["V", Number(enabled), [2]],
         ["D", 1, [6]],
       ],
     );
