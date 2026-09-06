@@ -265,6 +265,11 @@ export interface CcRelReq {
 }
 export declare function packCcRelReq(r: CcRelReq): Uint8Array;
 export declare function decodeCcRelReq(bytes: Uint8Array): CcRelReq;
+export declare function decodeCcPushReq(bytes: Uint8Array): {
+    contentsType?: number;
+    contents?: Uint8Array;
+    compContentsType?: number;
+};
 export interface PlanetMcHdr {
     cid: string;
     srcChanId: bigint;
@@ -288,6 +293,35 @@ export interface McDataRsp {
 }
 export declare function packMcDataRsp(r: McDataRsp): Uint8Array;
 export declare function decodeMcDataRsp(bytes: Uint8Array): McDataRsp;
+/** Native standalone MC STRM_REQ (0x318d): VP8 in SVC mode, VGA receive layer. */
+export declare function packMcStrmReq(sequence: number, requests: Array<{
+    ssrc: number;
+    channel: number;
+    start: boolean;
+}>): Uint8Array;
+/** The same STRM_REQ arrives at a publisher to select its outgoing SVC layers. */
+export declare function decodeMcStrmReq(bytes: Uint8Array): {
+    sequence: number;
+    requests: {
+        type: number;
+        ssrc: number;
+        mid: string;
+        startOperation: number;
+        encoding: number;
+        channel: number;
+        layers: {
+            layer: number;
+            codec: number;
+        }[];
+    }[];
+};
+/** NOTIFY_STRM_REQ.strm_info; validate the entire update before applying it. */
+export declare function decodeMcNotifyStrmReq(bytes: Uint8Array): Array<{
+    state: 0 | 1 | 2;
+    ssrc: number;
+    channel: number;
+    mid?: string;
+}>;
 export interface PlanetUeInfo {
     userId?: string;
     svcId?: string;
@@ -616,6 +650,10 @@ export interface NativeSetupMediaRecord {
     kind?: number;
     /** All advertised pmap values, not only the first codec. */
     kinds?: number[];
+    features?: Array<{
+        id?: number;
+        version?: number;
+    }>;
     rtpId?: number;
     /** Native local_srcid (SSRC), despite the legacy property name. */
     rtpPort?: number;

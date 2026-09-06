@@ -17,6 +17,45 @@ export function packetizeEas2(opus: Uint8Array): Uint8Array {
   return payload;
 }
 
+/** Aggregate up to six of our 20ms Opus frames (native ptime 20..120ms). */
+export function packetizeEas2Frames(frames: readonly Uint8Array[]): Uint8Array {
+  if (frames.length < 1 || frames.length > 6) throw new Error("Invalid EAS2 send frame count");
+  if (frames.length === 1) return packetizeEas2(frames[0]);
+  for (const frame of frames) {
+    if (frame.length < 1 || frame.length > 1276 || (frame[0] & 3) !== 0) {
+      throw new Error("EAS2 send requires single Opus frames");
+    }
+  }
+  const configs = frames.map((frame) => frame[0] & 0xfc);
+  const headerConfigs = configs.every((c) => c === configs[0]) ? [configs[0]] : configs;
+  const vbr = frames.some((frame) => frame.length !== frames[0].length);
+  const header = [
+    0x10,
+    ...headerConfigs.map((c, i) => c | 2 | (i === headerConfigs.length - 1 ? 1 : 0)),
+    frames.length | (vbr ? 0x80 : 0),
+  ];
+  const celtCount = configs.filter((c) => c >= 0x80).length;
+  if (celtCount) header.push((0xff << (8 - celtCount)) & 0xff);
+  if (vbr) {
+    for (const frame of frames.slice(0, -1)) {
+      const length = frame.length - 1;
+      if (length < 252) header.push(length);
+      else {
+        const first = 252 + (length % 4);
+        header.push(first, (length - first) / 4);
+      }
+    }
+  }
+  const out = new Uint8Array(header.length + frames.reduce((n, f) => n + f.length - 1, 0));
+  out.set(header);
+  let offset = header.length;
+  for (const frame of frames) {
+    out.set(frame.subarray(1), offset);
+    offset += frame.length - 1;
+  }
+  return out;
+}
+
 export function depacketizeEas2(payload: Uint8Array): Uint8Array[] {
   let offset = 1; // Native always consumes the chunk/silence header.
   const read = () => {

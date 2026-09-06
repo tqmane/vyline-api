@@ -14,12 +14,14 @@ import { buildCallWireContext, describeRouteTransport } from "./context.js";
 import type { Client } from "@vyline/protocol/stack";
 import type { DesktopProfile } from "../desktop/types.js";
 
-export function describeCallRoute(route: LINETypes.CallRoute): "planet" | "andromeda" {
+export function describeCallRoute(
+  route: LINETypes.CallRoute | LINETypes.GroupCallRoute,
+): "planet" | "andromeda" {
   return describeRouteTransport(route);
 }
 
 export function pickCallTransport(
-  route: LINETypes.CallRoute,
+  route: LINETypes.CallRoute | LINETypes.GroupCallRoute,
   ctx: CallWireContext,
   transportOpts?: { callId?: string; debug?: (event: Record<string, unknown>) => void },
 ): CallTransport {
@@ -44,7 +46,7 @@ export function pickCallTransport(
 /** client + route から wire コンテキスト付き transport */
 export function pickCallTransportForClient(
   client: Client,
-  route: LINETypes.CallRoute,
+  route: LINETypes.CallRoute | LINETypes.GroupCallRoute,
   opts?: {
     desktopProfile?: DesktopProfile | null;
     deviceMode?: string;

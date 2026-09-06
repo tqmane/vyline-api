@@ -1,5 +1,6 @@
 import { assertEquals, assertThrows } from "@vyline/protocol/stack/assert";
 import { depacketizeEas2, packetizeEas2 } from "./eas2.ts";
+import { packetizeEas2Frames } from "./eas2.ts";
 import { opusCodecFactory } from "../opus.ts";
 
 Deno.test("EAS2 native single-frame speech and silence headers reconstruct Opus", () => {
@@ -26,6 +27,30 @@ Deno.test("EAS2 CELT pairs skip speech mask, hybrid pairs do not", () => {
     new Uint8Array([0x78, 0x11]),
     new Uint8Array([0x78, 0x21]),
   ]);
+});
+
+Deno.test("EAS2 packetizes group 40ms pairs without raw Opus framing", () => {
+  const celt = [new Uint8Array([0xf8, 0x11, 0x12]), new Uint8Array([0xf8, 0x21, 0x22])];
+  assertEquals(
+    packetizeEas2Frames(celt),
+    new Uint8Array([0x10, 0xfb, 2, 0xc0, 0x11, 0x12, 0x21, 0x22]),
+  );
+  for (const frames of [
+    celt,
+    [new Uint8Array([0x78, 0x11]), celt[1]],
+    [new Uint8Array([0xf8, ...new Uint8Array(256)]), celt[1]],
+    Array.from({ length: 6 }, () => celt[0]),
+  ]) {
+    assertEquals(depacketizeEas2(packetizeEas2Frames(frames)), frames);
+  }
+  assertEquals(packetizeEas2Frames([celt[0]]), packetizeEas2(celt[0]));
+  for (const frames of [
+    [],
+    new Array(7).fill(celt[0]),
+    [new Uint8Array()],
+    [new Uint8Array([0xfb, 2, 1, 2])],
+  ])
+    assertThrows(() => packetizeEas2Frames(frames));
 });
 
 Deno.test("EAS2 mixed configs repeat final config and parse VBR lengths", () => {

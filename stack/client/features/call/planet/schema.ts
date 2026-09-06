@@ -43,17 +43,19 @@ export function encodeVarint(v: bigint | number): Uint8Array {
 }
 
 export function decodeVarint(buf: Uint8Array, off: number): [bigint, number] {
-  let v = 0n,
-    shift = 0n,
-    i = off;
-  while (i < buf.length) {
+  if (!Number.isInteger(off) || off < 0) throw new Error("Invalid protobuf offset");
+  let v = 0n;
+  let shift = 0n;
+  let i = off;
+  while (i < buf.length && i - off < 10) {
     const b = BigInt(buf[i]);
+    if (i - off === 9 && b > 1n) throw new Error("Protobuf varint exceeds uint64");
     v |= (b & 0x7fn) << shift;
     shift += 7n;
     i++;
-    if ((b & 0x80n) === 0n) break;
+    if ((b & 0x80n) === 0n) return [v, i - off];
   }
-  return [v, i - off];
+  throw new Error("Truncated protobuf varint");
 }
 
 function fixed64(v: bigint): Uint8Array {
@@ -866,6 +868,20 @@ export function decodeCcRelReq(bytes: Uint8Array): CcRelReq {
   };
 }
 
+// Native cc_push_req: contents are the same conference_info as PARTICIPATE_RSP.
+export function decodeCcPushReq(bytes: Uint8Array): {
+  contentsType?: number;
+  contents?: Uint8Array;
+  compContentsType?: number;
+} {
+  const fields = decodeFields(bytes);
+  return {
+    contentsType: asNumberField(fields, 1),
+    contents: asBytesField(fields, 2),
+    compContentsType: asNumberField(fields, 3),
+  };
+}
+
 // ─── planet_mc_msg / mc_data_req — group media-control bootstrap ───────
 
 export interface PlanetMcHdr {
@@ -935,6 +951,118 @@ export function decodeMcDataRsp(bytes: Uint8Array): McDataRsp {
     dispatchId: asNumberField(fields, 4),
     data: asBytesField(fields, 5),
   };
+}
+
+/** Native standalone MC STRM_REQ (0x318d): VP8 in SVC mode, VGA receive layer. */
+export function packMcStrmReq(
+  sequence: number,
+  requests: Array<{ ssrc: number; channel: number; start: boolean }>,
+): Uint8Array {
+  if (
+    requests.length > 60 ||
+    [sequence, ...requests.flatMap((r) => [r.ssrc, r.channel])].some(
+      (v) => !Number.isInteger(v) || v < 0 || v > 0xffffffff,
+    )
+  )
+    throw new Error("Invalid stream subscription");
+  const b: Buf = { bytes: [] };
+  for (const request of requests) {
+    const record: Buf = { bytes: [] };
+    const layer: Buf = { bytes: [] };
+    emitEnum(record, 1, request.start ? 1 : 0);
+    emitUint32(record, 3, request.ssrc);
+    emitEnum(record, 5, request.start ? 1 : 0);
+    emitEnum(record, 6, 1);
+    emitUint32(record, 7, request.channel);
+    emitEnum(layer, 1, 2);
+    emitEnum(layer, 2, 0);
+    emitMessage(record, 8, finalize(layer));
+    emitMessage(b, 1, finalize(record));
+  }
+  emitUint32(b, 2, sequence);
+  return finalize(b);
+}
+
+/** The same STRM_REQ arrives at a publisher to select its outgoing SVC layers. */
+export function decodeMcStrmReq(bytes: Uint8Array) {
+  if (bytes.length > 65536) throw new Error("Stream request too large");
+  const one = (fields: DecodedField[], tag: number) => {
+    const found = fields.filter((field) => field.tag === tag);
+    if (found.length > 1) throw new Error("Duplicate stream request field");
+    return found[0]?.value;
+  };
+  const uint = (fields: DecodedField[], tag: number) => {
+    const value = one(fields, tag);
+    if (value === undefined) return;
+    if (typeof value !== "bigint" || value < 0n || value > 0xffffffffn)
+      throw new Error("Invalid stream request integer");
+    return Number(value);
+  };
+  const fields = decodeFields(bytes);
+  const entries = fields.filter((field) => field.tag === 1);
+  if (!entries.length || entries.length > 60) throw new Error("Invalid stream request count");
+  const requests = entries.map((entry) => {
+    if (!(entry.value instanceof Uint8Array)) throw new Error("Invalid stream request record");
+    const values = decodeFields(entry.value);
+    const type = uint(values, 1);
+    const ssrc = uint(values, 3);
+    const uid = one(values, 2);
+    const mid = uid instanceof Uint8Array ? new TextDecoder().decode(uid) : undefined;
+    const startOperation = uint(values, 5) ?? 0;
+    const encoding = uint(values, 6) ?? 0;
+    if (
+      type === undefined ||
+      type > 1 ||
+      ssrc === undefined ||
+      startOperation > 1 ||
+      encoding > 2 ||
+      (uid !== undefined && (!mid || !/^u[0-9a-f]{32}$/.test(mid)))
+    )
+      throw new Error("Invalid stream request");
+    const layerRecords = values.filter((field) => field.tag === 8);
+    if (layerRecords.length > 16) throw new Error("Too many requested video layers");
+    const layers = layerRecords.map((record) => {
+      if (!(record.value instanceof Uint8Array)) throw new Error("Invalid video layer");
+      const fields = decodeFields(record.value);
+      const layer = uint(fields, 1);
+      const codec = uint(fields, 2);
+      if (layer === undefined || layer > 15 || codec === undefined || codec > 3)
+        throw new Error("Invalid requested video layer");
+      return { layer, codec };
+    });
+    return { type, ssrc, mid, startOperation, encoding, channel: uint(values, 7), layers };
+  });
+  return { sequence: uint(fields, 2), requests };
+}
+
+/** NOTIFY_STRM_REQ.strm_info; validate the entire update before applying it. */
+export function decodeMcNotifyStrmReq(bytes: Uint8Array): Array<{
+  state: 0 | 1 | 2;
+  ssrc: number;
+  channel: number;
+  mid?: string;
+}> {
+  if (bytes.length > 65536) throw new Error("Stream notification too large");
+  const records = decodeFields(bytes).filter((f) => f.tag === 1);
+  if (records.length > 512) throw new Error("Too many stream notifications");
+  return records.map((record) => {
+    if (!(record.value instanceof Uint8Array)) throw new Error("Invalid stream notification");
+    const fields = decodeFields(record.value);
+    for (const tag of [1, 2, 3, 5])
+      if (fields.filter((f) => f.tag === tag).length > 1) throw new Error("Duplicate stream field");
+    const numbers = [1, 3, 5].map((tag) => {
+      const value = fields.find((f) => f.tag === tag)?.value;
+      if (typeof value !== "bigint" || value < 0n || value > 0xffffffffn)
+        throw new Error("Invalid stream integer");
+      return Number(value);
+    });
+    const [state, ssrc, channel] = numbers;
+    const uid = fields.find((f) => f.tag === 2)?.value;
+    const mid = uid instanceof Uint8Array ? new TextDecoder().decode(uid) : undefined;
+    if (state > 2 || (uid !== undefined && (!mid || !/^u[0-9a-f]{32}$/.test(mid))))
+      throw new Error("Invalid stream identity/state");
+    return { state: state as 0 | 1 | 2, ssrc, channel, mid };
+  });
 }
 
 export interface PlanetUeInfo {
@@ -1226,18 +1354,8 @@ export function decodeMcStreamControl(data: Uint8Array): McStreamControl | undef
   if (![1, 2, 3, 4].includes(operation) || count > 16 || length < 12 + count * 4) {
     throw new Error("Invalid stream control");
   }
-  const senderOffset = 20 + count * 4;
-  if (length > 12 + count * 4) {
-    if (senderOffset + 2 > 8 + length) throw new Error("Truncated stream sender");
-    const senderLength = view.getUint16(senderOffset);
-    if (
-      senderLength < 1 ||
-      senderLength > 128 ||
-      senderOffset + 2 + senderLength !== 8 + length ||
-      data[8 + length - 1] !== 0
-    )
-      throw new Error("Invalid stream sender");
-  }
+  // Native 0x5d5970 ignores an invalid optional sender and returns the validated
+  // control. We do not use/read sender metadata (including any outer padding).
   return {
     operation: operation as McStreamControl["operation"],
     mediaKind: view.getUint32(12),
@@ -1372,9 +1490,11 @@ export function decodeFields(buf: Uint8Array): DecodedField[] {
   const out: DecodedField[] = [];
   let i = 0;
   while (i < buf.length) {
+    if (out.length >= 4096) throw new Error("Too many protobuf fields");
     const [k, kl] = decodeVarint(buf, i);
     i += kl;
     const tag = Number(k >> 3n);
+    if (tag < 1 || tag > 0x1fffffff) throw new Error("Invalid protobuf field number");
     const wt = Number(k & 7n) as WireType;
     if (wt === WireType.Varint) {
       const [v, vl] = decodeVarint(buf, i);
@@ -1383,12 +1503,15 @@ export function decodeFields(buf: Uint8Array): DecodedField[] {
     } else if (wt === WireType.LengthDelim) {
       const [len, ll] = decodeVarint(buf, i);
       i += ll;
+      if (len > BigInt(buf.length - i)) throw new Error("Truncated protobuf bytes");
       out.push({ tag, wireType: wt, value: buf.subarray(i, i + Number(len)) });
       i += Number(len);
     } else if (wt === WireType.Fixed64) {
+      if (i + 8 > buf.length) throw new Error("Truncated protobuf fixed64");
       out.push({ tag, wireType: wt, value: readFixed64(buf, i) });
       i += 8;
     } else if (wt === WireType.Fixed32) {
+      if (i + 4 > buf.length) throw new Error("Truncated protobuf fixed32");
       out.push({ tag, wireType: wt, value: buf.subarray(i, i + 4) });
       i += 4;
     } else throw new Error(`decodeFields: unknown wire type ${wt}`);
@@ -1992,6 +2115,7 @@ export interface NativeSetupMediaRecord {
   kind?: number;
   /** All advertised pmap values, not only the first codec. */
   kinds?: number[];
+  features?: Array<{ id?: number; version?: number }>;
   rtpId?: number;
   /** Native local_srcid (SSRC), despite the legacy property name. */
   rtpPort?: number;
@@ -2027,6 +2151,12 @@ export function decodeNativeSetupOffer(bytes: Uint8Array): NativeSetupOffer {
         bitrate: asNumberField(codec, 4),
         kind: asNumberField(codec, 50),
         kinds: repeatedNumbers(codec, 50),
+        features: item
+          .filter((field) => field.tag === 51 && field.value instanceof Uint8Array)
+          .map((field) => {
+            const feature = decodeFields(field.value as Uint8Array);
+            return { id: asNumberField(feature, 1), version: asNumberField(feature, 2) };
+          }),
         rtpId: asNumberField(path, 1),
         rtpPort: asNumberField(path, 11),
         rtcpId: asNumberField(path, 61),

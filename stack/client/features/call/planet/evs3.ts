@@ -9,6 +9,8 @@ export interface EncodedVideoFrame {
   /** Unsigned 90 kHz RTP timestamp. */
   timestamp: number;
   rotation?: number;
+  /** Conference-verified sender; absent for direct calls and local uploads. */
+  sourceMid?: string;
 }
 
 export function validateVp8(data: Uint8Array, expectedKey?: boolean): void {
@@ -72,7 +74,7 @@ export function packetizeEvs3(
   return packets;
 }
 
-export function parseEvs3(payload: Uint8Array) {
+export function parseEvs3(payload: Uint8Array, allowLayers = false) {
   let offset = 0;
   const read = () => {
     if (offset >= payload.length) throw new Error("Truncated EVS3 descriptor");
@@ -83,11 +85,16 @@ export function parseEvs3(payload: Uint8Array) {
   const pictureId = (read() << 8) | read();
   const begin = Boolean(flags & 8);
   const end = Boolean(flags & 4);
+  let spatialId = 0;
+  let temporalId = 0;
   if (begin && (flags & 0x2a) !== 0x2a) throw new Error("EVS3 first descriptor incomplete");
   if (flags & 0x20) {
     const layer = read();
-    // ponytail: single-layer VP8 only; negotiate a layered decoder before accepting SVC.
-    if (layer & 0xee) throw new Error("Unsupported EVS3 layer");
+    // Direct calls retain the single-layer contract; group SVC validates the
+    // profile and selects its spatial stream before normalizing this descriptor.
+    if (!allowLayers && layer & 0xee) throw new Error("Unsupported EVS3 layer");
+    spatialId = (layer >>> 1) & 7;
+    temporalId = layer >>> 5;
     if ((flags & 0x50) === 0x50) {
       let reference = read();
       for (let count = 1; reference & 1; count++) {
@@ -115,7 +122,7 @@ export function parseEvs3(payload: Uint8Array) {
     }
   }
   if (offset >= payload.length) throw new Error("Empty EVS3 fragment");
-  return { pictureId, begin, end, key, rotation, offset };
+  return { pictureId, begin, end, key, rotation, offset, spatialId, temporalId };
 }
 
 interface Picture {

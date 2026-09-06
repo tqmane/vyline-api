@@ -20,6 +20,7 @@ import { makeChunkHdr } from "./framing.ts";
 import {
   CC_MSG,
   decodeCcConnReq,
+  decodeCcRelReq,
   decodeFields,
   decodeMcDataRsp,
   decodeMcDataReq,
@@ -40,13 +41,17 @@ import {
   packPlanetMcMsg,
   packPlanetMsg,
   packPlanetUserAgent,
+  packPlanetAddr,
   type PlanetSetupOfferMaterial,
   wrapCcMsg,
   wrapMcMsg,
 } from "./schema.ts";
 import { PlanetTransport } from "./transport.ts";
+import { encodePb } from "./cassini.ts";
 import { depacketizeEas2 } from "./eas2.ts";
-import { Evs3Assembler, packetizeEvs3 } from "./evs3.ts";
+import { Evs3Assembler, packetizeEvs3, parseEvs3 } from "./evs3.ts";
+import { packetizeSvcVp8, unwrapSvcVp8 } from "./svc.ts";
+import { buildPdtp, pdtpUint } from "./pdtp.ts";
 import { buildRtp, deriveSrtpContext, parseRtp, srtpDecrypt, srtpEncrypt } from "../srtp.ts";
 
 type CallRouteLike = Parameters<PlanetTransport["connect"]>[0]["route"];
@@ -335,6 +340,998 @@ Deno.test("PlanetTransport retains generated media offer material for SRTP setup
   assertEquals(media.material.mediaNonce.length, 16);
   assertEquals(media.material.mediaSecret.length, 30);
   assertEquals(media.offer.length, 311);
+});
+
+for (const outcome of [
+  "accepted",
+  "accepted-data",
+  "accepted-video",
+  "remote-end",
+  "rejected",
+  "no-media",
+] as const) {
+  Deno.test(`group participate ${outcome}: verifies join before media and uses negotiated bridge`, async () => {
+    const peer = generateEphemeralKeypair();
+    const cid = "group-test";
+    const seed = new Uint8Array(16).fill(8);
+    const peerSecret = new Uint8Array(30).fill(7);
+    const mediaWire: Array<{ packet: Uint8Array; port: number }> = [];
+    const mcTags: number[] = [];
+    const releases: ReturnType<typeof decodeCcRelReq>[] = [];
+    const subscriptions: ReturnType<typeof decodePlanetMsg>[] = [];
+    const notifyAcks: ReturnType<typeof decodePlanetMsg>[] = [];
+    const publisherAcks: ReturnType<typeof decodePlanetMsg>[] = [];
+    let mediaChannel = 0n;
+    let subscribed!: () => void;
+    const subscriptionSeen = new Promise<void>((resolve) => {
+      subscribed = resolve;
+    });
+    let offered: Uint8Array | undefined;
+    let serverKeys: TransportKeys | undefined;
+    let incoming: Uint8Array | undefined;
+    let remoteRelease: Uint8Array | undefined;
+    let releaseNow = false;
+    let receivedData!: () => void;
+    const dataSeen = new Promise<void>((resolve) => {
+      receivedData = resolve;
+    });
+    const inner = [11, 22].map((ssrc) =>
+      buildRtp({
+        payloadType: 96,
+        ssrc,
+        seq: 1,
+        timestamp: 960,
+        payload: new Uint8Array([0x10, 0xf9, 0xff, 0xfd]),
+      }),
+    );
+    incoming = await srtpEncrypt(
+      await deriveSrtpContext(derivePlanetMediaStreamKeying(peerSecret, "AUDIO")),
+      buildRtp({
+        payloadType: 96,
+        ssrc: 100,
+        seq: 1,
+        timestamp: 960,
+        payload: concatBytes(inner),
+        extensionProfile: 0x0240,
+        extensionData: new Uint8Array([3, 1, 16, 16]),
+      }),
+    );
+    if (outcome === "accepted-data")
+      incoming = await srtpEncrypt(
+        await deriveSrtpContext(derivePlanetMediaStreamKeying(peerSecret, "DATA")),
+        buildRtp({
+          payloadType: 98,
+          ssrc: 300,
+          seq: 1,
+          timestamp: 0,
+          payload: new Uint8Array([
+            0x80,
+            0,
+            ...new TextEncoder().encode("PLANET"),
+            0,
+            0,
+            8,
+            4,
+            1,
+            1,
+            0x12,
+            0,
+          ]),
+          extensionProfile: 0x0240,
+        }),
+      );
+    const transport = new PlanetTransport({
+      localMid: "u-local",
+      callId: cid,
+      timeoutMs: 500,
+      keepaliveIntervalMs: outcome === "remote-end" || outcome === "accepted-video" ? 10 : 0,
+      debug(event) {
+        if (event.type === "group_pdtp_handled") receivedData();
+      },
+      wireSend(packet, endpoint) {
+        if (isRtpLike(packet)) {
+          mediaWire.push({ packet, port: endpoint.port });
+          return;
+        }
+        if (endpoint.plaintext.length === 519 || endpoint.plaintext.length === 10) return;
+        const msg = decodePlanetMsg(endpoint.plaintext);
+        if (msg.hdr?.msgId === 0x1101) {
+          if (releaseNow) {
+            const release = remoteRelease;
+            remoteRelease = undefined;
+            return release;
+          }
+          const reply = incoming;
+          incoming = undefined;
+          return reply;
+        }
+        if (msg.mc?.bodyTag !== undefined) mcTags.push(msg.mc.bodyTag);
+        if (msg.mc?.bodyTag === MC_MSG.STRM_REQ && serverKeys) {
+          subscriptions.push(msg);
+          if (subscriptions.length === 2) subscribed();
+          const reply = buildServerWire(
+            serverKeys,
+            packPlanetMsg(
+              { ...msg.hdr!, msgId: 0x328d, locNonce: 123n },
+              {
+                kind: "mc",
+                data: packPlanetMcMsg(
+                  { cid, srcChanId: 123n, dstChanId: mediaChannel },
+                  wrapMcMsg(MC_MSG.STRM_RSP, packMcDataRsp({ result: 0, relCode: 0 })),
+                ),
+              },
+            ),
+            0x5004,
+          );
+          return subscriptions.length === 2
+            ? new Promise<Uint8Array>((resolve) => setTimeout(() => resolve(reply), 100))
+            : reply;
+        }
+        if (msg.mc?.bodyTag === MC_MSG.NOTIFY_STRM_RSP) notifyAcks.push(msg);
+        if (msg.mc?.bodyTag === MC_MSG.STRM_RSP) publisherAcks.push(msg);
+        if (msg.mc?.bodyTag === MC_MSG.DATA_REQ && serverKeys) {
+          mediaChannel = msg.mc.hdr!.srcChanId!;
+          const request = decodeMcDataReq(msg.mc.bodyBytes!);
+          const control = decodeMcStreamControl(request.data);
+          if (control)
+            return buildServerWire(
+              serverKeys,
+              packPlanetMsg(
+                {
+                  ...msg.hdr!,
+                  userId: "u-server",
+                  msgId: 0x3289,
+                  locNonce: 123n,
+                },
+                {
+                  kind: "mc",
+                  data: packPlanetMcMsg(
+                    { cid, srcChanId: 123n, dstChanId: msg.mc.hdr?.srcChanId },
+                    wrapMcMsg(
+                      MC_MSG.DATA_RSP,
+                      packMcDataRsp({ result: 0, dispatchId: 2, data: request.data }),
+                    ),
+                  ),
+                },
+              ),
+              0x5003,
+            );
+        }
+        if (msg.cc?.bodyTag === CC_MSG.REL_REQ) releases.push(decodeCcRelReq(msg.cc.bodyBytes!));
+        if (msg.cc?.bodyTag !== CC_MSG.PARTICIPATE_REQ) return;
+        offered = decodeFields(msg.cc.bodyBytes!).find((f) => f.tag === 11)?.value as Uint8Array;
+        const keys = deriveCallKeys({
+          mpkey: extractBootstrapClientPub(packet),
+          local: peer,
+          bootstrapSeed: seed,
+          sendLabel: 0x3456,
+          recvLabel: 0x3456,
+        }).send;
+        serverKeys = keys;
+        const answer =
+          outcome === "no-media"
+            ? new Uint8Array()
+            : packNativeGroupParticipateOffer({ mediaSecret: peerSecret });
+        remoteRelease = buildServerWire(
+          keys,
+          buildControlPlain({
+            bodyTag: CC_MSG.REL_REQ,
+            bodyBytes: packCcRelReq({ relCode: 2, releaser: "server", roomDestroy: false }),
+            msgId: 0x2245,
+            sessId: seed,
+            locNonce: 123n,
+            cid,
+            srcChanId: 123n,
+          }),
+          0x5002,
+        );
+        const body = encodePb([
+          { tag: 1, wireType: 0, value: outcome === "rejected" ? 1n : 0n },
+          { tag: 6, wireType: 2, value: answer },
+          { tag: 7, wireType: 0, value: 123n },
+          ...(outcome === "accepted-video"
+            ? [
+                { tag: 8, wireType: 0 as const, value: 1n },
+                {
+                  tag: 9,
+                  wireType: 2 as const,
+                  value: encodePb([
+                    { tag: 1, wireType: 0, value: 1n },
+                    { tag: 2, wireType: 0, value: 1n },
+                    ...[31, 32].map((ssrc) => ({
+                      tag: 50,
+                      wireType: 2 as const,
+                      value: encodePb([
+                        {
+                          tag: 1,
+                          wireType: 2,
+                          value: new TextEncoder().encode(`u${String(ssrc).padStart(32, "0")}`),
+                        },
+                        { tag: 3, wireType: 0, value: 1n },
+                        {
+                          tag: 10,
+                          wireType: 2,
+                          value: encodePb([
+                            { tag: 1, wireType: 2, value: new TextEncoder().encode("V") },
+                            { tag: 2, wireType: 0, value: BigInt(ssrc) },
+                          ]),
+                        },
+                      ]),
+                    })),
+                  ]),
+                },
+              ]
+            : []),
+          {
+            tag: 101,
+            wireType: 2,
+            value: encodePb([
+              { tag: 1, wireType: 2, value: packPlanetAddr({ ip: "127.0.0.2", port: 12345 }) },
+            ]),
+          },
+        ]);
+        return buildServerWire(
+          keys,
+          buildControlPlain({
+            bodyTag: CC_MSG.PARTICIPATE_RSP,
+            bodyBytes: body,
+            msgId: 0x2261,
+            sessId: seed,
+            locNonce: 123n,
+            cid,
+            srcChanId: 123n,
+          }),
+          0x5001,
+          { bootstrap: { label: 0x3456, seed, pub: peer.publicKey } },
+        );
+      },
+    });
+    await transport.connect({
+      route: {
+        voipAddress: "127.0.0.1",
+        voipUdpPort: 9,
+        commParam: JSON.stringify({ mpkey: bytesToBase64(peer.publicKey) }),
+        token: "test-token",
+        hostMid: "u-local",
+      } as CallRouteLike,
+    });
+    try {
+      if (outcome === "rejected" || outcome === "no-media") {
+        await assertRejects(() => transport.joinGroupDetailed({ roomId: "c-room" }));
+        if (outcome === "rejected") assertEquals(mcTags.includes(MC_MSG.DATA_REQ), false);
+        return;
+      }
+      const result = await transport.joinGroupDetailed({ roomId: "c-room" });
+      assertEquals(result.mediaReady, true);
+      if (outcome === "accepted-video") {
+        assertEquals(transport.videoAvailable, true);
+        const receivedAudio = transport.receiveAudio()[Symbol.asyncIterator]();
+        for (const ssrc of [11, 22]) assertEquals((await receivedAudio.next()).value?.ssrc, ssrc);
+        const pendingAudio = receivedAudio.next(); // DATA notifier is pumped with audio.
+        const channel = encodePb([
+          {
+            tag: 2,
+            wireType: 2,
+            value: encodePb([
+              {
+                tag: 2,
+                wireType: 2,
+                value: encodePb([
+                  { tag: 1, wireType: 0, value: 1n },
+                  { tag: 2, wireType: 0, value: 42n },
+                  ...[31, 32].map((ssrc) => ({
+                    tag: 11,
+                    wireType: 2 as const,
+                    value: encodePb([
+                      {
+                        tag: 1,
+                        wireType: 2,
+                        value: new TextEncoder().encode(`u${String(ssrc).padStart(32, "0")}`),
+                      },
+                      { tag: 3, wireType: 0, value: 1n },
+                      {
+                        tag: 11,
+                        wireType: 2,
+                        value: encodePb([
+                          { tag: 1, wireType: 2, value: new TextEncoder().encode("V") },
+                          { tag: 2, wireType: 0, value: BigInt(ssrc) },
+                        ]),
+                      },
+                    ]),
+                  })),
+                ]),
+              },
+            ]),
+          },
+        ]);
+        incoming = await srtpEncrypt(
+          await deriveSrtpContext(derivePlanetMediaStreamKeying(peerSecret, "DATA")),
+          buildRtp({
+            payloadType: 98,
+            ssrc: 300,
+            seq: 1,
+            timestamp: 0,
+            extensionProfile: 0x0240,
+            payload: buildPdtp({
+              number: 1n,
+              service: "PLANET",
+              sections: [
+                { type: 4, body: new Uint8Array([1, 1, 0, 0]) },
+                {
+                  type: 1,
+                  body: new Uint8Array([
+                    1,
+                    1,
+                    0x1e,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ...pdtpUint(BigInt(channel.length)),
+                    ...channel,
+                  ]),
+                },
+              ],
+            }),
+          }),
+        );
+        await withTimeout(subscriptionSeen, 500, "group video subscription");
+        assertEquals(subscriptions[0].hdr?.msgId, 0x318d);
+        assertEquals(subscriptions[0].mc?.hdr, { cid, srcChanId: mediaChannel, dstChanId: 123n });
+        const requests = decodeFields(subscriptions[1].mc!.bodyBytes!)
+          .filter((f) => f.tag === 1)
+          .map((f) => decodeFields(f.value as Uint8Array));
+        assertEquals(
+          requests.map((f) => [
+            f.find((v) => v.tag === 3)?.value,
+            f.find((v) => v.tag === 7)?.value,
+          ]),
+          [
+            [31n, 0n],
+            [32n, 0n],
+            [31n, 42n],
+            [32n, 42n],
+          ],
+        );
+        let pendingSources = [31, 32];
+        transport.onConference = (members) => {
+          pendingSources = members.flatMap((m) =>
+            m.sources.filter((s) => s.name === "V").map((s) => s.ssrc),
+          );
+        };
+        incoming = buildServerWire(
+          serverKeys!,
+          packPlanetMsg(
+            { ...subscriptions[0].hdr!, msgId: 0x318f, locNonce: 123n },
+            {
+              kind: "mc",
+              data: packPlanetMcMsg(
+                { cid, srcChanId: 123n, dstChanId: mediaChannel },
+                wrapMcMsg(MC_MSG.NOTIFY_STRM_REQ, new Uint8Array([10, 6, 8, 1, 24, 31, 40, 99])),
+              ),
+            },
+          ),
+          0x5200,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        assertEquals(pendingSources, [31, 32]); // Known channel 42 applies even while its STRM ACK is pending.
+        notifyAcks.length = 0;
+        await new Promise((resolve) => setTimeout(resolve, 90));
+        const vp8 = new Uint8Array([0x30, 0, 0, 0x9d, 1, 0x2a, 0x80, 2, 0x68, 1, 0, 0]);
+        await transport.setVideoEnabled(true);
+        const beforeDemand = mediaWire.length;
+        await transport.sendVideo({ data: vp8, key: true, timestamp: 9000 });
+        assertEquals(mediaWire.length, beforeDemand);
+        incoming = buildServerWire(
+          serverKeys!,
+          packPlanetMsg(
+            { ...subscriptions[0].hdr!, msgId: 0x318d, locNonce: 123n },
+            {
+              kind: "mc",
+              data: packPlanetMcMsg(
+                { cid, srcChanId: 123n, dstChanId: mediaChannel },
+                wrapMcMsg(
+                  MC_MSG.STRM_REQ,
+                  encodePb([
+                    {
+                      tag: 1,
+                      wireType: 2,
+                      value: encodePb([
+                        { tag: 1, wireType: 0, value: 1n },
+                        { tag: 3, wireType: 0, value: 213n },
+                        { tag: 6, wireType: 0, value: 1n },
+                        { tag: 8, wireType: 2, value: new Uint8Array([8, 2, 16, 0]) },
+                      ]),
+                    },
+                  ]),
+                ),
+              ),
+            },
+          ),
+          0x5007,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await transport.sendVideo({ data: vp8, key: true, timestamp: 9000 });
+        const videoRx = await deriveSrtpContext(
+          derivePlanetMediaStreamKeying(transport.localMediaOffer!.material.mediaSecret, "VIDEO"),
+        );
+        const sent = parseRtp(await srtpDecrypt(videoRx, mediaWire.pop()!.packet));
+        assertEquals(
+          [sent.payloadType, sent.ssrc, sent.timestamp, sent.extensionProfile],
+          [97, 213, 9000, 0x0200],
+        );
+        assertEquals((sent.payload[4] >>> 1) & 15, 2); // 640x360 is native resolution class 2.
+        assertEquals(
+          new Evs3Assembler().push({ ...sent, payload: unwrapSvcVp8(sent.payload) })?.data,
+          vp8,
+        );
+        await transport.setVideoEnabled(false);
+        await assertRejects(() => transport.sendVideo({ data: vp8, key: true, timestamp: 9100 }));
+        const videoTx = await deriveSrtpContext(derivePlanetMediaStreamKeying(peerSecret, "VIDEO"));
+        const videoReceived = transport.receiveVideo()[Symbol.asyncIterator]();
+        for (const ssrc of [31, 32]) {
+          const part = packetizeSvcVp8(vp8, true, 1, 1, 2)[0];
+          incoming = await srtpEncrypt(
+            videoTx,
+            buildRtp({
+              payloadType: 97,
+              ssrc,
+              seq: 1,
+              timestamp: 9000,
+              marker: true,
+              payload: part.payload,
+              extensionProfile: 0x0240,
+              extensionData: part.extensionData,
+            }),
+          );
+          const frame = (await withTimeout(videoReceived.next(), 500, "group participant video"))
+            .value;
+          assertEquals(frame?.data, vp8);
+          assertEquals(frame?.sourceMid, `u${String(ssrc).padStart(32, "0")}`);
+        }
+        const notify = (state: number, foreign = false) =>
+          buildServerWire(
+            serverKeys!,
+            packPlanetMsg(
+              {
+                ...subscriptions[0].hdr!,
+                sessId: seed,
+                userId: "u-server",
+                msgId: 0x318f,
+                tranId: new Uint8Array([state + 1]),
+                locNonce: 123n,
+              },
+              {
+                kind: "mc",
+                data: packPlanetMcMsg(
+                  { cid: foreign ? "foreign" : cid, srcChanId: 123n, dstChanId: mediaChannel },
+                  wrapMcMsg(
+                    MC_MSG.NOTIFY_STRM_REQ,
+                    new Uint8Array([10, 6, 8, state, 24, 31, 40, 42]),
+                  ),
+                ),
+              },
+            ),
+            0x5100 + state,
+          );
+        let latestVideoSources: number[] = [];
+        transport.onConference = (members) => {
+          latestVideoSources = members.flatMap((m) =>
+            m.sources.filter((s) => s.name === "V").map((s) => s.ssrc),
+          );
+        };
+        incoming = notify(1, true);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        assertEquals(notifyAcks.length, 0);
+        incoming = notify(1);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        assertEquals(latestVideoSources, [32]);
+        assertEquals(notifyAcks[0]?.hdr?.msgId, 0x328f);
+        assertEquals(notifyAcks[0]?.hdr?.tranId, new Uint8Array([2]));
+        assertEquals(
+          decodeFields(notifyAcks[0].mc!.bodyBytes!).map((f) => [f.tag, f.value]),
+          [
+            [1, 0n],
+            [2, 0n],
+          ],
+        );
+        const nextVideo = videoReceived.next();
+        for (const ssrc of [31, 32]) {
+          const part = packetizeSvcVp8(vp8, true, 2, 2, 2)[0];
+          incoming = await srtpEncrypt(
+            videoTx,
+            buildRtp({
+              payloadType: 97,
+              ssrc,
+              seq: 2,
+              timestamp: 18000,
+              marker: true,
+              payload: part.payload,
+              extensionProfile: 0x0240,
+              extensionData: part.extensionData,
+            }),
+          );
+          await new Promise((resolve) => setTimeout(resolve, 30));
+        }
+        assertEquals(
+          (await withTimeout(nextVideo, 500, "unpaused participant continues")).value?.sourceMid,
+          `u${"32".padStart(32, "0")}`,
+        );
+        incoming = notify(2);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        assertEquals(latestVideoSources, [31, 32]);
+        assertEquals(subscriptions.length, 2); // Camera pause/resume does not resubscribe everyone.
+        // A later channel unsubscribe must not be undone by an earlier NOTIFY channel hint.
+        const leaveChannel = encodePb([
+          {
+            tag: 2,
+            wireType: 2,
+            value: encodePb([
+              {
+                tag: 2,
+                wireType: 2,
+                value: encodePb([
+                  { tag: 1, wireType: 0, value: 2n },
+                  { tag: 2, wireType: 0, value: 42n },
+                  {
+                    tag: 11,
+                    wireType: 2,
+                    value: encodePb([
+                      {
+                        tag: 1,
+                        wireType: 2,
+                        value: new TextEncoder().encode(`u${"31".padStart(32, "0")}`),
+                      },
+                      { tag: 3, wireType: 0, value: 0n },
+                    ]),
+                  },
+                ]),
+              },
+            ]),
+          },
+        ]);
+        incoming = await srtpEncrypt(
+          await deriveSrtpContext(derivePlanetMediaStreamKeying(peerSecret, "DATA")),
+          buildRtp({
+            payloadType: 98,
+            ssrc: 300,
+            seq: 2,
+            timestamp: 0,
+            extensionProfile: 0x0240,
+            payload: buildPdtp({
+              number: 2n,
+              service: "PLANET",
+              sections: [
+                {
+                  type: 1,
+                  body: new Uint8Array([
+                    1,
+                    1,
+                    0x1e,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ...pdtpUint(BigInt(channel.length)),
+                    ...pdtpUint(BigInt(leaveChannel.length)),
+                    ...leaveChannel,
+                  ]),
+                },
+              ],
+            }),
+          }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        assertEquals(subscriptions.length, 3);
+        const stopped = decodeFields(
+          decodeFields(subscriptions[2].mc!.bodyBytes!).find((f) => f.tag === 1)!
+            .value as Uint8Array,
+        );
+        assertEquals(
+          stopped.filter((f) => [1, 3, 7].includes(f.tag)).map((f) => [f.tag, f.value]),
+          [
+            [1, 0n],
+            [3, 31n],
+            [7, 42n],
+          ],
+        );
+        for (const [source, foreign] of [
+          [999, false],
+          [213, true],
+          [213, false],
+        ] as const) {
+          incoming = buildServerWire(
+            serverKeys!,
+            packPlanetMsg(
+              {
+                ...subscriptions[0].hdr!,
+                msgId: 0x318d,
+                tranId: new Uint8Array([44]),
+                locNonce: 123n,
+              },
+              {
+                kind: "mc",
+                data: packPlanetMcMsg(
+                  { cid: foreign ? "foreign" : cid, srcChanId: 123n, dstChanId: mediaChannel },
+                  wrapMcMsg(
+                    MC_MSG.STRM_REQ,
+                    encodePb([
+                      {
+                        tag: 1,
+                        wireType: 2,
+                        value: encodePb([
+                          { tag: 1, wireType: 0, value: 1n },
+                          { tag: 3, wireType: 0, value: BigInt(source) },
+                          { tag: 6, wireType: 0, value: 1n },
+                          { tag: 8, wireType: 2, value: new Uint8Array([8, 2, 16, 1]) },
+                        ]),
+                      },
+                    ]),
+                  ),
+                ),
+              },
+            ),
+            0x5201,
+          );
+          await new Promise((resolve) => setTimeout(resolve, 30));
+        }
+        assertEquals(publisherAcks.length, 2);
+        assertEquals(publisherAcks[1].hdr?.msgId, 0x328d);
+        assertEquals(publisherAcks[1].hdr?.tranId, new Uint8Array([44]));
+        assertEquals(publisherAcks[1].mc?.bodyBytes, new Uint8Array([8, 0, 16, 0]));
+        // Receipt acknowledgement must never turn the user's camera on.
+        await assertRejects(() => transport.sendVideo({ data: vp8, key: true, timestamp: 27000 }));
+        await transport.setVideoEnabled(true);
+        await transport.sendVideo({ data: vp8, key: true, timestamp: 27000 });
+        const selectedCodec = parseRtp(await srtpDecrypt(videoRx, mediaWire.pop()!.packet));
+        assertEquals(selectedCodec.payload[parseEvs3(selectedCodec.payload, true).offset], 4); // Request codecid1 selects VP8A framing.
+        assertEquals(
+          new Evs3Assembler().push({
+            ...selectedCodec,
+            payload: unwrapSvcVp8(selectedCodec.payload),
+          })?.data,
+          vp8,
+        );
+        await transport.setVideoEnabled(false);
+        await videoReceived.return?.();
+        await transport.close();
+        assertEquals((await pendingAudio).done, true);
+        return;
+      }
+      const local = transport.localMediaOffer!;
+      assertEquals(local.offer, offered);
+      assertEquals(transport.audioProfile?.frameDurationMs, 20);
+      const rx = await deriveSrtpContext(
+        derivePlanetMediaStreamKeying(local.material.mediaSecret, "AUDIO"),
+      );
+      for (let i = 0; i < 10; i++)
+        await transport.send(new Uint8Array([0xf8, 0xff, 0xfd]), { audioLevel: 57 });
+      assertEquals(mediaWire.length, 5); // no recorded DATA / RTCP replay
+      for (const [index, wire] of mediaWire.entries()) {
+        const rtp = parseRtp(await srtpDecrypt(rx, wire.packet));
+        assertEquals(rtp.ssrc, 203); // Group answer assigns this TX SSRC.
+        assertEquals(rtp.extensionData, new Uint8Array([1, 2, 0xc0, 0x68, 57, 0, 0, 0]));
+        assertEquals(wire.port, 12345);
+        assertEquals(rtp.timestamp, (index + 1) * 1920);
+        assertEquals(depacketizeEas2(rtp.payload), [
+          new Uint8Array([0xf8, 0xff, 0xfd]),
+          new Uint8Array([0xf8, 0xff, 0xfd]),
+        ]);
+      }
+      const received = transport.receiveAudio()[Symbol.asyncIterator]();
+      if (outcome === "accepted-data") {
+        const waiting = received.next();
+        await withTimeout(dataSeen, 500, "authenticated group DATA");
+        const dataRx = await deriveSrtpContext(
+          derivePlanetMediaStreamKeying(local.material.mediaSecret, "DATA"),
+        );
+        assertEquals(mediaWire.length, 7);
+        const ack = parseRtp(await srtpDecrypt(dataRx, mediaWire[5].packet));
+        assertEquals([ack.payloadType, ack.ssrc, ack.seq], [98, 223, 1]);
+        assertEquals([...ack.payload], [0x80, 0, 0, 0x40, 0, 4, 1, 3, 0, 0]);
+        await transport.close();
+        assertEquals((await waiting).done, true);
+        return;
+      }
+      for (const ssrc of [11, 22]) {
+        const next = await withTimeout(received.next(), 500, "group audio");
+        assertEquals(next.value, {
+          ssrc,
+          timestamp: 960,
+          frames: [new Uint8Array([0xf8, 0xff, 0xfd])],
+        });
+      }
+      if (outcome === "remote-end") {
+        releaseNow = true;
+        assertEquals(
+          (await withTimeout(received.next(), 500, "group release ends media")).done,
+          true,
+        );
+        assertEquals(transport.remoteEnded, true);
+        assertEquals((await transport.receiveAudio()[Symbol.asyncIterator]().next()).done, true);
+      }
+      await received.return?.();
+    } finally {
+      await transport.close();
+      await transport.close();
+      assertEquals(
+        releases.map((r) => [r.releaser, r.roomDestroy]),
+        outcome === "remote-end" ? [] : [["participant", false]],
+      );
+    }
+  });
+}
+
+Deno.test("group control scopes PUSH/REL to negotiated CID, updates roster and acknowledges transactions", async () => {
+  const peer = generateEphemeralKeypair();
+  const seed = new Uint8Array(16).fill(8);
+  const cid = "negotiated-group";
+  const mid = `u${"1".repeat(32)}`;
+  const controls: Uint8Array[] = [];
+  const replies: ReturnType<typeof decodePlanetMsg>[] = [];
+  const rosters: string[][] = [];
+  let releaseNow = false;
+  const transport = new PlanetTransport({
+    localMid: "u-local",
+    callId: "requested-group",
+    timeoutMs: 500,
+    keepaliveIntervalMs: 10,
+    wireSend(packet, endpoint) {
+      if (
+        isRtpLike(packet) ||
+        endpoint.plaintext.length === 519 ||
+        endpoint.plaintext.length === 10
+      )
+        return;
+      const msg = decodePlanetMsg(endpoint.plaintext);
+      if (msg.hdr?.msgId === 0x1101) return releaseNow ? controls.shift() : undefined;
+      if (msg.cc?.bodyTag !== CC_MSG.PARTICIPATE_REQ) {
+        if (msg.cc) replies.push(msg);
+        return;
+      }
+      const keys = deriveCallKeys({
+        mpkey: extractBootstrapClientPub(packet),
+        local: peer,
+        bootstrapSeed: seed,
+        sendLabel: 0x3456,
+        recvLabel: 0x3456,
+      }).send;
+      let seq = 0x5001;
+      const control = (bodyTag: number, bodyBytes: Uint8Array, msgId: number, call = cid) =>
+        buildServerWire(
+          keys,
+          buildControlPlain({
+            bodyTag,
+            bodyBytes,
+            msgId,
+            sessId: seed,
+            locNonce: 123n,
+            cid: call,
+            srcChanId: 123n,
+          }),
+          seq++,
+        );
+      const push = (connected: boolean, version: number) =>
+        encodePb([
+          { tag: 1, wireType: 0, value: 1n },
+          {
+            tag: 2,
+            wireType: 2,
+            value: encodePb([
+              { tag: 1, wireType: 0, value: 0n },
+              { tag: 2, wireType: 0, value: BigInt(version) },
+              {
+                tag: 50,
+                wireType: 2,
+                value: encodePb([
+                  { tag: 1, wireType: 2, value: new TextEncoder().encode(mid) },
+                  { tag: 3, wireType: 0, value: connected ? 1n : 0n },
+                ]),
+              },
+            ]),
+          },
+        ]);
+      const rel = packCcRelReq({ relCode: 2, roomDestroy: false });
+      controls.push(
+        control(CC_MSG.REL_REQ, rel, 0x2145, "unrelated-call"),
+        control(CC_MSG.PUSH_REQ, push(true, 99), 0x2150, "unrelated-call"),
+        control(CC_MSG.PUSH_REQ, push(true, 1), 0x2150),
+        control(CC_MSG.PUSH_REQ, push(false, 2), 0x2150),
+        control(CC_MSG.REL_REQ, rel, 0x2145),
+      );
+      return buildServerWire(
+        keys,
+        buildControlPlain({
+          bodyTag: CC_MSG.PARTICIPATE_RSP,
+          bodyBytes: encodePb([
+            { tag: 1, wireType: 0, value: 0n },
+            {
+              tag: 6,
+              wireType: 2,
+              value: packNativeGroupParticipateOffer({ mediaSecret: new Uint8Array(30).fill(7) }),
+            },
+            { tag: 7, wireType: 0, value: 123n },
+          ]),
+          msgId: 0x2261,
+          sessId: seed,
+          locNonce: 123n,
+          cid,
+          srcChanId: 123n,
+        }),
+        seq++,
+        { bootstrap: { label: 0x3456, seed, pub: peer.publicKey } },
+      );
+    },
+  });
+  transport.onConference = (members) => rosters.push(members.map((m) => m.mid));
+  await transport.connect({
+    route: {
+      voipAddress: "127.0.0.1",
+      voipUdpPort: 9,
+      commParam: JSON.stringify({ mpkey: bytesToBase64(peer.publicKey) }),
+      token: "test-token",
+      hostMid: "u-local",
+    } as CallRouteLike,
+  });
+  try {
+    await transport.joinGroupDetailed({ roomId: "c-room" });
+    releaseNow = true;
+    const received = transport.receiveAudio()[Symbol.asyncIterator]();
+    assertEquals((await withTimeout(received.next(), 1000, "scoped group release")).done, true);
+    assertEquals(rosters, [[mid], []]);
+    assertEquals(controls.length, 0);
+    assertEquals(
+      replies.map((m) => [m.cc?.bodyTag, m.hdr?.msgId]),
+      [
+        [CC_MSG.PUSH_RSP, 0x2250],
+        [CC_MSG.PUSH_RSP, 0x2250],
+        [CC_MSG.REL_RSP, 0x2245],
+      ],
+    );
+    for (const reply of replies) {
+      assertEquals(reply.cc?.hdr?.cid, cid);
+      assertEquals(reply.cc?.hdr?.dstChanId, 123n);
+      assertEquals(decodeFields(reply.cc!.bodyBytes!)[0].value, 0n);
+      const requestId = reply.cc?.bodyTag === CC_MSG.REL_RSP ? 0x2145 : 0x2150;
+      assertEquals(reply.hdr?.tranId, new Uint8Array(16).fill(requestId & 255));
+      assertEquals(reply.hdr?.rmtNonce, 123n);
+    }
+  } finally {
+    await transport.close();
+  }
+});
+
+Deno.test("Group DATA learns its media endpoint only after SRTP authentication", async () => {
+  const server = await bindUdpServer();
+  const mediaServer = await bindUdpServer();
+  const peer = generateEphemeralKeypair();
+  const secret = new Uint8Array(30).fill(7);
+  const seed = new Uint8Array(16).fill(8);
+  let client: RemoteInfo | undefined;
+  let error: unknown;
+  let resolveAck!: (wire: Uint8Array) => void;
+  const ack = new Promise<Uint8Array>((resolve) => {
+    resolveAck = resolve;
+  });
+  mediaServer.on("message", (wire) => resolveAck(new Uint8Array(wire)));
+  server.on("message", (buf, rinfo) => {
+    if (client) return;
+    client = rinfo;
+    try {
+      const wire = new Uint8Array(buf);
+      const keys = deriveCallKeys({
+        mpkey: extractBootstrapClientPub(wire),
+        local: peer,
+        bootstrapSeed: seed,
+        sendLabel: 0x3456,
+        recvLabel: 0x3456,
+      }).send;
+      const body = encodePb([
+        { tag: 1, wireType: 0, value: 0n },
+        { tag: 6, wireType: 2, value: packNativeGroupParticipateOffer({ mediaSecret: secret }) },
+        { tag: 7, wireType: 0, value: 123n },
+        {
+          tag: 101,
+          wireType: 2,
+          value: encodePb([
+            {
+              tag: 1,
+              wireType: 2,
+              value: packPlanetAddr({
+                ip: "127.0.0.1",
+                port: (server.address() as { port: number }).port,
+              }),
+            },
+          ]),
+        },
+      ]);
+      void sendUdp(
+        server,
+        buildServerWire(
+          keys,
+          buildControlPlain({
+            bodyTag: CC_MSG.PARTICIPATE_RSP,
+            bodyBytes: body,
+            msgId: 0x2261,
+            sessId: seed,
+            locNonce: 123n,
+            cid: "test-group",
+            srcChanId: 123n,
+          }),
+          0x5001,
+          { bootstrap: { label: 0x3456, seed, pub: peer.publicKey } },
+        ),
+        rinfo,
+      );
+    } catch (e) {
+      error = e;
+    }
+  });
+  const transport = new PlanetTransport({
+    localMid: "u-local",
+    timeoutMs: 500,
+    keepaliveIntervalMs: 0,
+  });
+  let receiver: Promise<IteratorResult<unknown>> | undefined;
+  try {
+    await transport.connect({
+      route: {
+        voipAddress: "127.0.0.1",
+        voipUdpPort: (server.address() as { port: number }).port,
+        commParam: JSON.stringify({ mpkey: bytesToBase64(peer.publicKey) }),
+        token: "test-token",
+        hostMid: "u-local",
+      } as CallRouteLike,
+    });
+    await transport.joinGroup({ roomId: "c-room" });
+    if (error) throw error;
+    assert(client);
+    receiver = transport.receiveAudio()[Symbol.asyncIterator]().next();
+    const rtp = buildRtp({
+      payloadType: 98,
+      ssrc: 123,
+      seq: 1,
+      timestamp: 0,
+      payload: new Uint8Array([
+        0x80,
+        0,
+        ...new TextEncoder().encode("PLANET"),
+        0,
+        0,
+        8,
+        4,
+        1,
+        1,
+        0x12,
+        0,
+      ]),
+      extensionProfile: 0x0240,
+    });
+    await sendUdp(
+      mediaServer,
+      await srtpEncrypt(await deriveSrtpContext(new Uint8Array(30)), rtp),
+      client,
+    );
+    await sendUdp(
+      mediaServer,
+      await srtpEncrypt(
+        await deriveSrtpContext(derivePlanetMediaStreamKeying(secret, "DATA")),
+        rtp,
+      ),
+      client,
+    );
+    const response = await withTimeout(ack, 500, "group ACK sent to authenticated media source");
+    const rx = await deriveSrtpContext(
+      derivePlanetMediaStreamKeying(transport.localMediaOffer!.material.mediaSecret, "DATA"),
+    );
+    assertEquals(parseRtp(await srtpDecrypt(rx, response)).payloadType, 98);
+  } finally {
+    await transport.close();
+    await receiver;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await new Promise<void>((resolve) => mediaServer.close(() => resolve()));
+  }
 });
 
 async function testIncomingAnswer(peerSecurity: "both" | "simple" | "none") {
