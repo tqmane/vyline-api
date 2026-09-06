@@ -105,6 +105,7 @@ Deno.test("conference maps video sources to explicit channel IDs with independen
   const source = encodePb([string(1, "V"), scalar(2, 33)]);
   const user = encodePb([string(1, mid(1)), scalar(3, 1), bytes(10, source)]);
   state.accept(notification(1, true, [user]));
+  assertEquals(state.videoSources, [{ mid: mid(1), ssrc: 33, channel: 0 }]);
   const channel = (version: number, memberState: number, channelId?: number) =>
     encodePb([
       bytes(

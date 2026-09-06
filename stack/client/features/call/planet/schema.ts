@@ -953,7 +953,7 @@ export function decodeMcDataRsp(bytes: Uint8Array): McDataRsp {
   };
 }
 
-/** Native standalone MC STRM_REQ (0x318d): auto VP8, VGA receive layer. */
+/** Native standalone MC STRM_REQ (0x318d): VP8 in SVC mode, VGA receive layer. */
 export function packMcStrmReq(
   sequence: number,
   requests: Array<{ ssrc: number; channel: number; start: boolean }>,
@@ -972,7 +972,7 @@ export function packMcStrmReq(
     emitEnum(record, 1, request.start ? 1 : 0);
     emitUint32(record, 3, request.ssrc);
     emitEnum(record, 5, request.start ? 1 : 0);
-    emitEnum(record, 6, 0);
+    emitEnum(record, 6, 1);
     emitUint32(record, 7, request.channel);
     emitEnum(layer, 1, 2);
     emitEnum(layer, 2, 0);
@@ -981,6 +981,58 @@ export function packMcStrmReq(
   }
   emitUint32(b, 2, sequence);
   return finalize(b);
+}
+
+/** The same STRM_REQ arrives at a publisher to select its outgoing SVC layers. */
+export function decodeMcStrmReq(bytes: Uint8Array) {
+  if (bytes.length > 65536) throw new Error("Stream request too large");
+  const one = (fields: DecodedField[], tag: number) => {
+    const found = fields.filter((field) => field.tag === tag);
+    if (found.length > 1) throw new Error("Duplicate stream request field");
+    return found[0]?.value;
+  };
+  const uint = (fields: DecodedField[], tag: number) => {
+    const value = one(fields, tag);
+    if (value === undefined) return;
+    if (typeof value !== "bigint" || value < 0n || value > 0xffffffffn)
+      throw new Error("Invalid stream request integer");
+    return Number(value);
+  };
+  const fields = decodeFields(bytes);
+  const entries = fields.filter((field) => field.tag === 1);
+  if (!entries.length || entries.length > 60) throw new Error("Invalid stream request count");
+  const requests = entries.map((entry) => {
+    if (!(entry.value instanceof Uint8Array)) throw new Error("Invalid stream request record");
+    const values = decodeFields(entry.value);
+    const type = uint(values, 1);
+    const ssrc = uint(values, 3);
+    const uid = one(values, 2);
+    const mid = uid instanceof Uint8Array ? new TextDecoder().decode(uid) : undefined;
+    const startOperation = uint(values, 5) ?? 0;
+    const encoding = uint(values, 6) ?? 0;
+    if (
+      type === undefined ||
+      type > 1 ||
+      ssrc === undefined ||
+      startOperation > 1 ||
+      encoding > 2 ||
+      (uid !== undefined && (!mid || !/^u[0-9a-f]{32}$/.test(mid)))
+    )
+      throw new Error("Invalid stream request");
+    const layerRecords = values.filter((field) => field.tag === 8);
+    if (layerRecords.length > 16) throw new Error("Too many requested video layers");
+    const layers = layerRecords.map((record) => {
+      if (!(record.value instanceof Uint8Array)) throw new Error("Invalid video layer");
+      const fields = decodeFields(record.value);
+      const layer = uint(fields, 1);
+      const codec = uint(fields, 2);
+      if (layer === undefined || layer > 15 || codec === undefined || codec > 3)
+        throw new Error("Invalid requested video layer");
+      return { layer, codec };
+    });
+    return { type, ssrc, mid, startOperation, encoding, channel: uint(values, 7), layers };
+  });
+  return { sequence: uint(fields, 2), requests };
 }
 
 /** NOTIFY_STRM_REQ.strm_info; validate the entire update before applying it. */
@@ -1302,18 +1354,8 @@ export function decodeMcStreamControl(data: Uint8Array): McStreamControl | undef
   if (![1, 2, 3, 4].includes(operation) || count > 16 || length < 12 + count * 4) {
     throw new Error("Invalid stream control");
   }
-  const senderOffset = 20 + count * 4;
-  if (length > 12 + count * 4) {
-    if (senderOffset + 2 > 8 + length) throw new Error("Truncated stream sender");
-    const senderLength = view.getUint16(senderOffset);
-    if (
-      senderLength < 1 ||
-      senderLength > 128 ||
-      senderOffset + 2 + senderLength !== 8 + length ||
-      data[8 + length - 1] !== 0
-    )
-      throw new Error("Invalid stream sender");
-  }
+  // Native 0x5d5970 ignores an invalid optional sender and returns the validated
+  // control. We do not use/read sender metadata (including any outer padding).
   return {
     operation: operation as McStreamControl["operation"],
     mediaKind: view.getUint32(12),

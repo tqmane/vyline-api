@@ -49,7 +49,7 @@ import {
 import { PlanetTransport } from "./transport.ts";
 import { encodePb } from "./cassini.ts";
 import { depacketizeEas2 } from "./eas2.ts";
-import { Evs3Assembler, packetizeEvs3 } from "./evs3.ts";
+import { Evs3Assembler, packetizeEvs3, parseEvs3 } from "./evs3.ts";
 import { packetizeSvcVp8, unwrapSvcVp8 } from "./svc.ts";
 import { buildPdtp, pdtpUint } from "./pdtp.ts";
 import { buildRtp, deriveSrtpContext, parseRtp, srtpDecrypt, srtpEncrypt } from "../srtp.ts";
@@ -360,6 +360,7 @@ for (const outcome of [
     const releases: ReturnType<typeof decodeCcRelReq>[] = [];
     const subscriptions: ReturnType<typeof decodePlanetMsg>[] = [];
     const notifyAcks: ReturnType<typeof decodePlanetMsg>[] = [];
+    const publisherAcks: ReturnType<typeof decodePlanetMsg>[] = [];
     let mediaChannel = 0n;
     let subscribed!: () => void;
     const subscriptionSeen = new Promise<void>((resolve) => {
@@ -447,7 +448,7 @@ for (const outcome of [
         if (msg.mc?.bodyTag !== undefined) mcTags.push(msg.mc.bodyTag);
         if (msg.mc?.bodyTag === MC_MSG.STRM_REQ && serverKeys) {
           subscriptions.push(msg);
-          subscribed();
+          if (subscriptions.length === 2) subscribed();
           const reply = buildServerWire(
             serverKeys,
             packPlanetMsg(
@@ -462,11 +463,12 @@ for (const outcome of [
             ),
             0x5004,
           );
-          return subscriptions.length === 1
+          return subscriptions.length === 2
             ? new Promise<Uint8Array>((resolve) => setTimeout(() => resolve(reply), 100))
             : reply;
         }
         if (msg.mc?.bodyTag === MC_MSG.NOTIFY_STRM_RSP) notifyAcks.push(msg);
+        if (msg.mc?.bodyTag === MC_MSG.STRM_RSP) publisherAcks.push(msg);
         if (msg.mc?.bodyTag === MC_MSG.DATA_REQ && serverKeys) {
           mediaChannel = msg.mc.hdr!.srcChanId!;
           const request = decodeMcDataReq(msg.mc.bodyBytes!);
@@ -677,7 +679,7 @@ for (const outcome of [
         await withTimeout(subscriptionSeen, 500, "group video subscription");
         assertEquals(subscriptions[0].hdr?.msgId, 0x318d);
         assertEquals(subscriptions[0].mc?.hdr, { cid, srcChanId: mediaChannel, dstChanId: 123n });
-        const requests = decodeFields(subscriptions[0].mc!.bodyBytes!)
+        const requests = decodeFields(subscriptions[1].mc!.bodyBytes!)
           .filter((f) => f.tag === 1)
           .map((f) => decodeFields(f.value as Uint8Array));
         assertEquals(
@@ -686,6 +688,8 @@ for (const outcome of [
             f.find((v) => v.tag === 7)?.value,
           ]),
           [
+            [31n, 0n],
+            [32n, 0n],
             [31n, 42n],
             [32n, 42n],
           ],
@@ -716,6 +720,38 @@ for (const outcome of [
         await new Promise((resolve) => setTimeout(resolve, 90));
         const vp8 = new Uint8Array([0x30, 0, 0, 0x9d, 1, 0x2a, 0x80, 2, 0x68, 1, 0, 0]);
         await transport.setVideoEnabled(true);
+        const beforeDemand = mediaWire.length;
+        await transport.sendVideo({ data: vp8, key: true, timestamp: 9000 });
+        assertEquals(mediaWire.length, beforeDemand);
+        incoming = buildServerWire(
+          serverKeys!,
+          packPlanetMsg(
+            { ...subscriptions[0].hdr!, msgId: 0x318d, locNonce: 123n },
+            {
+              kind: "mc",
+              data: packPlanetMcMsg(
+                { cid, srcChanId: 123n, dstChanId: mediaChannel },
+                wrapMcMsg(
+                  MC_MSG.STRM_REQ,
+                  encodePb([
+                    {
+                      tag: 1,
+                      wireType: 2,
+                      value: encodePb([
+                        { tag: 1, wireType: 0, value: 1n },
+                        { tag: 3, wireType: 0, value: 213n },
+                        { tag: 6, wireType: 0, value: 1n },
+                        { tag: 8, wireType: 2, value: new Uint8Array([8, 2, 16, 0]) },
+                      ]),
+                    },
+                  ]),
+                ),
+              ),
+            },
+          ),
+          0x5007,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 30));
         await transport.sendVideo({ data: vp8, key: true, timestamp: 9000 });
         const videoRx = await deriveSrtpContext(
           derivePlanetMediaStreamKeying(transport.localMediaOffer!.material.mediaSecret, "VIDEO"),
@@ -723,9 +759,9 @@ for (const outcome of [
         const sent = parseRtp(await srtpDecrypt(videoRx, mediaWire.pop()!.packet));
         assertEquals(
           [sent.payloadType, sent.ssrc, sent.timestamp, sent.extensionProfile],
-          [97, 213, 9000, 0x0240],
+          [97, 213, 9000, 0x0200],
         );
-        assertEquals(sent.extensionData?.[3], 0x2e); // 640x360 is native resolution class 2.
+        assertEquals((sent.payload[4] >>> 1) & 15, 2); // 640x360 is native resolution class 2.
         assertEquals(
           new Evs3Assembler().push({ ...sent, payload: unwrapSvcVp8(sent.payload) })?.data,
           vp8,
@@ -825,7 +861,7 @@ for (const outcome of [
         incoming = notify(2);
         await new Promise((resolve) => setTimeout(resolve, 30));
         assertEquals(latestVideoSources, [31, 32]);
-        assertEquals(subscriptions.length, 1); // Camera pause/resume does not resubscribe everyone.
+        assertEquals(subscriptions.length, 2); // Camera pause/resume does not resubscribe everyone.
         // A later channel unsubscribe must not be undone by an earlier NOTIFY channel hint.
         const leaveChannel = encodePb([
           {
@@ -887,9 +923,9 @@ for (const outcome of [
           }),
         );
         await new Promise((resolve) => setTimeout(resolve, 30));
-        assertEquals(subscriptions.length, 2);
+        assertEquals(subscriptions.length, 3);
         const stopped = decodeFields(
-          decodeFields(subscriptions[1].mc!.bodyBytes!).find((f) => f.tag === 1)!
+          decodeFields(subscriptions[2].mc!.bodyBytes!).find((f) => f.tag === 1)!
             .value as Uint8Array,
         );
         assertEquals(
@@ -900,6 +936,64 @@ for (const outcome of [
             [7, 42n],
           ],
         );
+        for (const [source, foreign] of [
+          [999, false],
+          [213, true],
+          [213, false],
+        ] as const) {
+          incoming = buildServerWire(
+            serverKeys!,
+            packPlanetMsg(
+              {
+                ...subscriptions[0].hdr!,
+                msgId: 0x318d,
+                tranId: new Uint8Array([44]),
+                locNonce: 123n,
+              },
+              {
+                kind: "mc",
+                data: packPlanetMcMsg(
+                  { cid: foreign ? "foreign" : cid, srcChanId: 123n, dstChanId: mediaChannel },
+                  wrapMcMsg(
+                    MC_MSG.STRM_REQ,
+                    encodePb([
+                      {
+                        tag: 1,
+                        wireType: 2,
+                        value: encodePb([
+                          { tag: 1, wireType: 0, value: 1n },
+                          { tag: 3, wireType: 0, value: BigInt(source) },
+                          { tag: 6, wireType: 0, value: 1n },
+                          { tag: 8, wireType: 2, value: new Uint8Array([8, 2, 16, 1]) },
+                        ]),
+                      },
+                    ]),
+                  ),
+                ),
+              },
+            ),
+            0x5201,
+          );
+          await new Promise((resolve) => setTimeout(resolve, 30));
+        }
+        assertEquals(publisherAcks.length, 2);
+        assertEquals(publisherAcks[1].hdr?.msgId, 0x328d);
+        assertEquals(publisherAcks[1].hdr?.tranId, new Uint8Array([44]));
+        assertEquals(publisherAcks[1].mc?.bodyBytes, new Uint8Array([8, 0, 16, 0]));
+        // Receipt acknowledgement must never turn the user's camera on.
+        await assertRejects(() => transport.sendVideo({ data: vp8, key: true, timestamp: 27000 }));
+        await transport.setVideoEnabled(true);
+        await transport.sendVideo({ data: vp8, key: true, timestamp: 27000 });
+        const selectedCodec = parseRtp(await srtpDecrypt(videoRx, mediaWire.pop()!.packet));
+        assertEquals(selectedCodec.payload[parseEvs3(selectedCodec.payload, true).offset], 4); // Request codecid1 selects VP8A framing.
+        assertEquals(
+          new Evs3Assembler().push({
+            ...selectedCodec,
+            payload: unwrapSvcVp8(selectedCodec.payload),
+          })?.data,
+          vp8,
+        );
+        await transport.setVideoEnabled(false);
         await videoReceived.return?.();
         await transport.close();
         assertEquals((await pendingAudio).done, true);

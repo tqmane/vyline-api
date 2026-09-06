@@ -62,7 +62,7 @@ Deno.test("group stream subscription uses explicit channel and native notificati
       [1, 1n],
       [3, 31n],
       [5, 1n],
-      [6, 0n],
+      [6, 1n],
       [7, 42n],
     ],
   );
@@ -90,6 +90,27 @@ Deno.test("group stream subscription uses explicit channel and native notificati
     [10, 8, 8, 1, 8, 2, 24, 31, 40, 42],
   ])
     assertThrows(() => schema.decodeMcNotifyStrmReq(new Uint8Array(body)));
+});
+
+Deno.test("group publisher decodes SVC layer requests without assuming an optional channel", () => {
+  const body = new Uint8Array([
+    10, 18, 8, 1, 24, 111, 40, 0, 48, 1, 66, 4, 8, 2, 16, 1, 74, 2, 65, 66, 16, 3,
+  ]);
+  const parsed = schema.decodeMcStrmReq(body);
+  assertEquals(parsed.sequence, 3);
+  assertEquals(parsed.requests, [
+    {
+      type: 1,
+      ssrc: 111,
+      startOperation: 0,
+      encoding: 1,
+      layers: [{ layer: 2, codec: 1 }],
+      mid: undefined,
+      channel: undefined,
+    },
+  ]);
+  assertThrows(() => schema.decodeMcStrmReq(new Uint8Array([10, 2, 8, 1])));
+  assertThrows(() => schema.decodeMcStrmReq(new Uint8Array([10, 6, 8, 1, 8, 0, 24, 111])));
 });
 
 Deno.test("conference/control protobuf rejects truncated and overflowing fields", () => {
@@ -147,6 +168,53 @@ Deno.test("MCMMD video START uses native big-endian control layout and rejects t
   const badCount = data.slice();
   badCount[11] = 3;
   assertThrows(() => decodeMcStreamControl(badCount));
+});
+
+Deno.test("MCMMD ignores optional sender overruns like native without weakening control bounds", () => {
+  const packet = new Uint8Array([
+    0,
+    1,
+    0,
+    0,
+    0,
+    22,
+    0,
+    0, // 22-byte body, padded to 24 bytes.
+    0,
+    1,
+    0,
+    1,
+    0,
+    0,
+    0,
+    2,
+    0,
+    0,
+    0,
+    0,
+    0x11,
+    0x11,
+    0x11,
+    0x11,
+    0,
+    6,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0, // Sender claims 6, only 4 logical bytes remain.
+  ]);
+  assertEquals(decodeMcStreamControl(packet), {
+    operation: 1,
+    mediaKind: 2,
+    code: 0,
+    ssrcs: [0x11111111],
+  });
+  const truncated = packet.slice();
+  truncated[11] = 3;
+  assertThrows(() => decodeMcStreamControl(truncated));
+  assertThrows(() => decodeMcStreamControl(packet.subarray(0, 30)));
 });
 
 Deno.test("packPlanetMsgHdr matches an observed 96-byte header shape", () => {

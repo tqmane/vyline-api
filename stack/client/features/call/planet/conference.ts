@@ -95,6 +95,14 @@ export class ConferenceState {
   }
 
   get videoSources(): Array<{ mid: string; ssrc: number; channel: number }> {
+    // Native 0x5f1f2d / 0x5a8cf0: the unnamed conference resolves its sources
+    // from the roster and leaves channel=0. Named channel_info remains explicit.
+    if (!this.#channels.size)
+      return this.members.flatMap((member) =>
+        member.sources
+          .filter((s) => s.name === "V")
+          .map((source) => ({ mid: member.mid, ssrc: source.ssrc, channel: 0 })),
+      );
     const result: Array<{ mid: string; ssrc: number; channel: number }> = [];
     for (const [channel, state] of this.#channels) {
       for (const [mid, sources] of state.members) {

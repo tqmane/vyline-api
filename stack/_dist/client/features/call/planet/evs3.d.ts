@@ -11,13 +11,15 @@ export interface EncodedVideoFrame {
 }
 export declare function validateVp8(data: Uint8Array, expectedKey?: boolean): void;
 export declare function packetizeEvs3(data: Uint8Array, key: boolean, pictureId: number, fragmentBytes?: number): Uint8Array[];
-export declare function parseEvs3(payload: Uint8Array): {
+export declare function parseEvs3(payload: Uint8Array, allowLayers?: boolean): {
     pictureId: number;
     begin: boolean;
     end: boolean;
     key: boolean;
     rotation: number;
     offset: number;
+    spatialId: number;
+    temporalId: number;
 };
 interface VideoRtpPacket {
     payload: Uint8Array;

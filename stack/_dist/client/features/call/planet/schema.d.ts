@@ -293,12 +293,28 @@ export interface McDataRsp {
 }
 export declare function packMcDataRsp(r: McDataRsp): Uint8Array;
 export declare function decodeMcDataRsp(bytes: Uint8Array): McDataRsp;
-/** Native standalone MC STRM_REQ (0x318d): auto VP8, VGA receive layer. */
+/** Native standalone MC STRM_REQ (0x318d): VP8 in SVC mode, VGA receive layer. */
 export declare function packMcStrmReq(sequence: number, requests: Array<{
     ssrc: number;
     channel: number;
     start: boolean;
 }>): Uint8Array;
+/** The same STRM_REQ arrives at a publisher to select its outgoing SVC layers. */
+export declare function decodeMcStrmReq(bytes: Uint8Array): {
+    sequence: number;
+    requests: {
+        type: number;
+        ssrc: number;
+        mid: string;
+        startOperation: number;
+        encoding: number;
+        channel: number;
+        layers: {
+            layer: number;
+            codec: number;
+        }[];
+    }[];
+};
 /** NOTIFY_STRM_REQ.strm_info; validate the entire update before applying it. */
 export declare function decodeMcNotifyStrmReq(bytes: Uint8Array): Array<{
     state: 0 | 1 | 2;
