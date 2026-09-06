@@ -140,6 +140,7 @@ interface VideoRtpPacket {
 }
 
 export class Evs3Assembler {
+  constructor(private readonly onInvalid?: (reason: string) => void) {}
   #picture?: Picture;
   #latest?: { timestamp: number; ssrc: number };
   #lastSequence?: number;
@@ -192,7 +193,8 @@ export class Evs3Assembler {
         }
       }
       return frame;
-    } catch {
+    } catch (error) {
+      this.onInvalid?.(error instanceof Error ? error.message : "Invalid video packet");
       this.#early = undefined;
       this.#discard();
       return undefined;
@@ -268,9 +270,10 @@ export class Evs3Assembler {
     }
     const bodyOffset = pd.offset + (pd.begin ? 3 : 0);
     if (pd.begin) {
-      if (bodyOffset >= packet.payload.length || packet.payload[pd.offset] > 3)
+      if (bodyOffset >= packet.payload.length)
         throw new Error("Invalid EVS3 VP8 length prefix");
-      picture.expectedBytes = (packet.payload[pd.offset] |
+      // Native type1's upper six bits are independent metadata, not extra bytes.
+      picture.expectedBytes = ((packet.payload[pd.offset] & 3) |
         (packet.payload[pd.offset + 1] << 2) | (packet.payload[pd.offset + 2] << 10)) - 3;
       if (picture.expectedBytes < 4 || picture.expectedBytes > MAX_VIDEO_FRAME_BYTES)
         throw new Error("Invalid EVS3 VP8 frame size");

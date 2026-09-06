@@ -860,7 +860,7 @@ export class PlanetTransport implements CallTransport {
   #videoRecv?: SrtpCryptoContext;
   #videoQueue: RtpDatagram[] = [];
   #videoWaiters: Array<(packet: RtpDatagram | null) => void> = [];
-  #videoAssembler = new Evs3Assembler();
+  #videoAssembler = new Evs3Assembler((reason) => this.#debug({ type: "video_ignored", reason }));
   #videoControl?: {
     tranId: Uint8Array;
     resolve: (data: Uint8Array | undefined) => void;

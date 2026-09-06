@@ -26,6 +26,8 @@ interface VideoRtpPacket {
 }
 export declare class Evs3Assembler {
     #private;
+    private readonly onInvalid?;
+    constructor(onInvalid?: (reason: string) => void);
     clear(): void;
     push(packet: VideoRtpPacket, now?: number): EncodedVideoFrame | undefined;
 }

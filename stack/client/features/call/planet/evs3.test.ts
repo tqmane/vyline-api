@@ -19,6 +19,16 @@ Deno.test("EVS3 VP8 includes the native 18-bit size prefix only on B packets", (
   assertEquals(new Evs3Assembler().push(pkt(packets[0], 1))?.data, vp8);
 });
 
+Deno.test("EVS3 accepts native VP8 codec flags separately from the 18-bit length", () => {
+  const packet = packetizeEvs3(au, true, 1)[0];
+  packet[5] |= 8; // Native-executed 0b0600 decodes/re-encodes as raw length 24.
+  assertEquals(new Evs3Assembler().push(pkt(packet, 1))?.data, au);
+  const withExtension = new Uint8Array([...packet.slice(0, 4), packet[4] | 1,
+    1, 0x88, ...new Uint8Array(8), ...packet.slice(5)]);
+  assertEquals(parseEvs3(withExtension).offset, 15);
+  assertEquals(new Evs3Assembler().push(pkt(withExtension, 1))?.data, au);
+});
+
 Deno.test("EVS3 matches Windows native PD fixtures and emits raw VP8", () => {
   for (const [value, begin, end, key] of [
     ["be12340020", true, true, true],
