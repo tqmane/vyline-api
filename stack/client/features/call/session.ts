@@ -9,9 +9,11 @@ import type {
   CodecFactory,
   PcmFrame,
 } from "./audio.js";
-import { defaultCodecFactory } from "./audio.js";
+import { defaultCodecFactory, pcmAudioLevel } from "./audio.js";
 import { TypedEventEmitter } from "../../../base/core/typed-event-emitter/index.js";
 import type { EncodedVideoFrame } from "./planet/evs3.js";
+import { GroupAudioMixer, type CallAudioPacket } from "./groupAudio.js";
+import type { ConferenceMember } from "./planet/conference.js";
 
 export type CallSessionState =
   | "idle"
@@ -34,6 +36,7 @@ export interface CallSessionOpts {
   transport?: CallTransport;
   /** transport 選択のため事前 acquire した route（二重 acquire 回避） */
   preacquiredRoute?: LINETypes.CallRoute;
+  group?: { route: LINETypes.GroupCallRoute };
 }
 
 export interface CallAudioProfile {
@@ -46,15 +49,21 @@ export interface CallAudioProfile {
 
 export interface CallTransport {
   readonly audioProfile?: CallAudioProfile | undefined;
-  connect(opts: { route: LINETypes.CallRoute; kind?: CallKind }): Promise<void>;
+  connect(opts: {
+    route: LINETypes.CallRoute | LINETypes.GroupCallRoute;
+    kind?: CallKind;
+  }): Promise<void>;
   readonly videoAvailable?: boolean;
   onVideoState?: (enabled: boolean) => void;
+  onConference?: (members: ConferenceMember[]) => void;
   setVideoEnabled?(enabled: boolean): Promise<void>;
   sendVideo?(frame: EncodedVideoFrame): Promise<void>;
   receiveVideo?(): AsyncIterable<EncodedVideoFrame>;
   close(): Promise<void>;
-  send(packet: Uint8Array): void | Promise<void>;
+  send(packet: Uint8Array, options?: { audioLevel?: number }): void | Promise<void>;
   receive(): AsyncIterable<Uint8Array>;
+  receiveAudio?(): AsyncIterable<CallAudioPacket>;
+  joinGroup?(opts: { roomId: string }): Promise<unknown>;
   /** Optional. When present, CallSession.start() drives the full
    *  signaling dialog after connect() (SIP INVITE → 200 → ACK). */
   invite?(opts: { to: string }): Promise<unknown>;
@@ -83,10 +92,11 @@ export const stubTransport: CallTransport = {
 
 export type CallSessionEvents = {
   state: (newState: CallSessionState, prev: CallSessionState) => void;
-  connected: (route: LINETypes.CallRoute) => void;
+  connected: (route: LINETypes.CallRoute | LINETypes.GroupCallRoute) => void;
   ended: (reason: string) => void;
   error: (err: Error) => void;
   video: (state: CallVideoState) => void;
+  participants: (members: ConferenceMember[]) => void;
 };
 
 export interface CallVideoState {
@@ -99,7 +109,7 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
   #client: Client;
   #opts: CallSessionOpts;
   #state: CallSessionState = "idle";
-  #route?: LINETypes.CallRoute;
+  #route?: LINETypes.CallRoute | LINETypes.GroupCallRoute;
   #transport: CallTransport;
   #codecs: CodecFactory;
   #encoder?: AudioEncoder;
@@ -107,6 +117,10 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
   #sendAbort?: AbortController;
   #receiveSink?: AudioSink;
   #endTask?: Promise<void>;
+  #startTask?: Promise<LINETypes.CallRoute | LINETypes.GroupCallRoute>;
+  #groupMixer?: GroupAudioMixer;
+  #participants?: ConferenceMember[];
+  #groupAudioSources = new Set<number>();
   #localVideoEnabled = false;
   #remoteVideoEnabled = false;
   #remoteVideoPaused = false;
@@ -118,6 +132,26 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
     this.#opts = opts;
     this.#transport = opts.transport ?? stubTransport;
     this.#codecs = opts.codecs ?? defaultCodecFactory;
+    this.#transport.onConference = (members) => {
+      if (
+        !this.#opts.group ||
+        this.#state === "ending" ||
+        this.#state === "ended" ||
+        this.#state === "failed"
+      )
+        return;
+      const sources = new Set(
+        members.flatMap((m) => m.sources.filter((s) => s.name === "A").map((s) => s.ssrc)),
+      );
+      for (const ssrc of this.#groupAudioSources)
+        if (!sources.has(ssrc)) this.#groupMixer?.remove(ssrc);
+      this.#groupAudioSources = sources;
+      this.#participants = members.map((m) => ({
+        ...m,
+        sources: m.sources.map((s) => ({ ...s })),
+      }));
+      this.emit("participants", this.participants!);
+    };
     this.#transport.onVideoState = (enabled) => {
       this.#remoteVideoPaused = !enabled;
       if (!enabled) this.#remoteVideoNeedsKey = true;
@@ -129,7 +163,10 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
   get state(): CallSessionState {
     return this.#state;
   }
-  get route(): LINETypes.CallRoute | undefined {
+  get participants(): ConferenceMember[] | undefined {
+    return this.#participants?.map((m) => ({ ...m, sources: m.sources.map((s) => ({ ...s })) }));
+  }
+  get route(): LINETypes.CallRoute | LINETypes.GroupCallRoute | undefined {
     return this.#route;
   }
   get peer(): string {
@@ -185,20 +222,37 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
     this.emit("state", s, prev);
   }
 
-  async start(): Promise<LINETypes.CallRoute> {
-    if (this.#route) return this.#route;
+  start(): Promise<LINETypes.CallRoute | LINETypes.GroupCallRoute> {
+    return (this.#startTask ??= this.#start());
+  }
+
+  #assertStarting(): void {
+    if (this.#state === "ending" || this.#state === "ended" || this.#state === "failed") {
+      throw new Error("Call ended during signaling");
+    }
+  }
+
+  async #start(): Promise<LINETypes.CallRoute | LINETypes.GroupCallRoute> {
     this.#setState("acquiring");
     try {
       this.#route =
+        this.#opts.group?.route ??
         this.#opts.preacquiredRoute ??
         (await this.#client.call.acquireRoute({
           to: this.#opts.to,
           callType: this.#opts.kind ?? "AUDIO",
           fromEnvInfo: this.#opts.fromEnvInfo,
         }));
+      this.#assertStarting();
       this.#setState("connecting");
       await this.#transport.connect({ route: this.#route, kind: this.kind });
-      if (this.#opts.direction === "incoming") {
+      this.#assertStarting();
+      if (this.#opts.group) {
+        if (!this.#transport.joinGroup || !this.#transport.receiveAudio) {
+          throw new Error("CallTransport does not support group calls");
+        }
+        await this.#transport.joinGroup({ roomId: this.#opts.to });
+      } else if (this.#opts.direction === "incoming") {
         this.#setState("ringing");
         if (!this.#transport.answer) {
           throw new Error("CallTransport does not support incoming calls");
@@ -213,6 +267,7 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
           await this.#transport.waitForAnswer({ to: this.#opts.to });
         }
       }
+      this.#assertStarting();
       this.#setState("in-call");
       this.emit("connected", this.#route);
       return this.#route;
@@ -222,8 +277,9 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
       } catch {
         /* preserve the signaling error */
       }
-      this.#setState("failed");
       const err = e instanceof Error ? e : new Error(String(e));
+      if (this.#state === "ending" || this.#state === "ended") throw err;
+      this.#setState("failed");
       this.emit("error", err);
       throw err;
     }
@@ -251,7 +307,8 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
       if (signal.aborted) break;
       if (targetFrameSamples <= 0 || frame.sampleRate !== 48000 || frame.channels !== 1) {
         const packet = enc.encode(frame);
-        if (packet) await this.#transport.send(packet);
+        if (packet)
+          await this.#transport.send(packet, { audioLevel: pcmAudioLevel(frame.samples) });
         continue;
       }
 
@@ -262,7 +319,7 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
       while (offset + targetFrameSamples <= combined.length) {
         const samples = combined.slice(offset, offset + targetFrameSamples);
         const packet = enc.encode({ samples, sampleRate: 48000, channels: 1 });
-        if (packet) await this.#transport.send(packet);
+        if (packet) await this.#transport.send(packet, { audioLevel: pcmAudioLevel(samples) });
         offset += targetFrameSamples;
       }
       pending = combined.slice(offset);
@@ -297,25 +354,17 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
       throw new Error(`receiveInto: session not in-call (state=${this.#state})`);
     }
     this.#receiveSink = sink;
-    const dec = (this.#decoder ??= this.#codecs.newDecoder({
-      sampleRate: 48000,
-      channels: 1,
-    }));
-    for await (const packet of this.#transport.receive()) {
-      try {
-        const frame = dec.decode(packet);
-        if (frame) await sink.write(frame);
-      } catch {
-        // A single malformed/unsupported RTP payload must not terminate the
-        // whole receive loop. Packet loss is preferable to killing the call.
-      }
-    }
+    for await (const frame of this.received()) await sink.write(frame);
     await sink.end?.();
   }
 
   async *received(): AsyncGenerator<PcmFrame> {
     if (this.#state !== "in-call") {
       throw new Error(`received: session not in-call (state=${this.#state})`);
+    }
+    if (this.#opts.group) {
+      yield* this.#receivedGroup();
+      return;
     }
     const dec = (this.#decoder ??= this.#codecs.newDecoder({
       sampleRate: 48000,
@@ -328,6 +377,40 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
       } catch {
         // Keep receiving after an isolated malformed/unsupported media packet.
       }
+    }
+  }
+
+  async *#receivedGroup(): AsyncGenerator<PcmFrame> {
+    const mixer = (this.#groupMixer = new GroupAudioMixer(this.#codecs));
+    let done = false;
+    let error: unknown;
+    const pump = (async () => {
+      for await (const packet of this.#transport.receiveAudio!()) {
+        if (this.#state !== "in-call") break;
+        if (this.#participants && !this.#groupAudioSources.has(packet.ssrc)) continue;
+        mixer.push(packet, performance.now());
+      }
+    })()
+      .catch((e) => {
+        error = e;
+      })
+      .finally(() => {
+        done = true;
+      });
+    try {
+      while (!done && this.#state === "in-call") {
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, Math.max(1, 20 - (performance.now() % 20))),
+        );
+        if (this.#state !== "in-call") break;
+        const frame = mixer.read(performance.now());
+        if (frame) yield frame;
+      }
+      if (error) throw error;
+    } finally {
+      mixer.close();
+      if (this.#state === "in-call") await this.end("audio-receive-ended");
+      await pump;
     }
   }
 
@@ -348,6 +431,12 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
       this.#localVideoEnabled = false;
       this.#remoteVideoEnabled = false;
       this.#decoder?.close?.();
+      this.#groupMixer?.close();
+      this.#groupAudioSources.clear();
+      if (this.#opts.group) {
+        this.#participants = [];
+        this.emit("participants", []);
+      }
       await this.#receiveSink?.end?.();
       this.#setState("ended");
       this.emit("ended", reason);

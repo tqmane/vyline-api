@@ -154,7 +154,8 @@ Deno.test("CallSession starts VIDEO and toggles its media without replacing audi
 
 Deno.test("CallSession does not show delayed video after peer camera pause", async () => {
   const transport: CallTransport = {
-    ...recordingTransport(), videoAvailable: true,
+    ...recordingTransport(),
+    videoAvailable: true,
     async *receiveVideo() {
       yield { data: new Uint8Array([1]), key: true, timestamp: 0 };
       transport.onVideoState?.(false);
@@ -228,6 +229,200 @@ Deno.test("CallSession.start answers an incoming call without acquiring or invit
   assertEquals(states, ["acquiring", "connecting", "ringing", "in-call"]);
 });
 
+Deno.test("group sessions join a preacquired route without direct-call signaling", async () => {
+  const { client, acquired, fakeRoute } = fakeClient();
+  const calls: string[] = [];
+  const transport: CallTransport = {
+    ...recordingTransport(),
+    async connect() {
+      calls.push("connect");
+    },
+    async invite() {
+      calls.push("invite");
+    },
+    async joinGroup({ roomId }) {
+      calls.push(roomId);
+    },
+    async *receiveAudio() {},
+  };
+  const session = new CallSession(client, {
+    to: "c-room",
+    group: { route: fakeRoute as never },
+    transport,
+  });
+  await session.start();
+  assertEquals(acquired, []);
+  assertEquals(calls, ["connect", "c-room"]);
+  assertEquals(session.state, "in-call");
+  await session.end();
+  const failing = new CallSession(client, {
+    to: "c-room",
+    group: { route: fakeRoute as never },
+    transport: {
+      ...transport,
+      async joinGroup() {
+        throw new Error("join rejected");
+      },
+    },
+  });
+  await assertRejects(() => failing.start(), Error, "join rejected");
+  assertEquals(failing.state, "failed");
+  await assertRejects(() => failing.start(), Error, "join rejected");
+});
+
+Deno.test("ending during signaling cannot resurrect a call", async () => {
+  let finishConnect!: () => void;
+  const connecting = new Promise<void>((resolve) => {
+    finishConnect = resolve;
+  });
+  const transport = { ...recordingTransport(), connect: () => connecting };
+  const session = new CallSession(fakeClient().client, { to: "u-p", transport });
+  const pending = session.start();
+  await Promise.resolve();
+  await session.end();
+  finishConnect();
+  await assertRejects(() => pending, Error, "Call ended");
+  assertEquals(session.state, "ended");
+});
+
+Deno.test("group session PCM uses simultaneous playout and closes its receive pump", async () => {
+  let finish!: () => void;
+  const stopped = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const encoder = passthroughCodecs().newEncoder({ sampleRate: 48000, channels: 1 });
+  const transport: CallTransport = {
+    ...recordingTransport(),
+    async joinGroup() {},
+    async close() {
+      finish();
+    },
+    async *receive() {
+      throw new Error("Group audio must not flatten speakers");
+    },
+    async *receiveAudio() {
+      for (const [ssrc, value] of [
+        [1, 10],
+        [2, 20],
+      ])
+        yield {
+          ssrc,
+          timestamp: 960,
+          frames: [
+            encoder.encode({
+              samples: new Int16Array(960).fill(value),
+              sampleRate: 48000,
+              channels: 1,
+            })!,
+          ],
+        };
+      await stopped;
+    },
+  };
+  const session = new CallSession(fakeClient().client, {
+    to: "c-room",
+    group: { route: fakeClient().fakeRoute as never },
+    transport,
+    codecs: passthroughCodecs(),
+  });
+  await session.start();
+  try {
+    for await (const frame of session.received()) {
+      assertEquals(frame.samples.length, 960);
+      assertEquals(frame.samples[0], 30);
+      break;
+    }
+    assertEquals(session.state, "ended");
+  } finally {
+    await session.end();
+  }
+});
+
+Deno.test("group participant departures discard their buffered and late audio", async () => {
+  let finish!: () => void;
+  const stopped = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const member = (n: number) => ({
+    mid: `u${String(n).padStart(32, "0")}`,
+    connected: true,
+    mediaFlags: 1,
+    sources: [{ name: "A", ssrc: n }],
+  });
+  const codecs = passthroughCodecs();
+  const encoder = codecs.newEncoder({ sampleRate: 48000, channels: 1 });
+  let created = 0,
+    closed = 0;
+  const transport: CallTransport = {
+    ...recordingTransport(),
+    async joinGroup() {
+      transport.onConference?.([member(1), member(2)]);
+    },
+    async close() {
+      finish();
+    },
+    async *receiveAudio() {
+      for (const [ssrc, timestamp, value] of [
+        [1, 960, 10],
+        [1, 1920, 10],
+        [2, 960, 20],
+      ]) {
+        if (timestamp === 1920) transport.onConference?.([member(2)]);
+        yield {
+          ssrc,
+          timestamp,
+          frames: [
+            encoder.encode({
+              samples: new Int16Array(960).fill(value),
+              sampleRate: 48000,
+              channels: 1,
+            })!,
+          ],
+        };
+      }
+      await stopped;
+    },
+  };
+  const session = new CallSession(fakeClient().client, {
+    to: "c-room",
+    group: { route: fakeClient().fakeRoute as never },
+    transport,
+    codecs: {
+      ...codecs,
+      newDecoder(options) {
+        created++;
+        const decoder = codecs.newDecoder(options);
+        return {
+          ...decoder,
+          close() {
+            closed++;
+            decoder.close?.();
+          },
+        };
+      },
+    },
+  });
+  const changes: number[] = [];
+  session.on("participants", (members) => changes.push(members.length));
+  await session.start();
+  assertEquals(session.participants?.length, 2);
+  const copy = session.participants!;
+  copy[0].sources = [];
+  assertEquals(session.participants![0].sources.length, 1);
+  try {
+    for await (const frame of session.received()) {
+      assertEquals(frame.samples[0], 20);
+      break;
+    }
+    assertEquals([created, closed], [2, 2]);
+    assertEquals(changes, [2, 1, 0]);
+    transport.onConference?.([member(1)]);
+    assertEquals(session.participants, []);
+  } finally {
+    await session.end();
+  }
+});
+
 Deno.test("CallSession.sendStream pumps PCM through codec → transport", async () => {
   const { client } = fakeClient();
   const transport = recordingTransport();
@@ -251,6 +446,7 @@ Deno.test("CallSession.sendStream follows a transport 40ms voice profile", async
   const { client } = fakeClient();
   const sent: Uint8Array[] = [];
   const encodedLengths: number[] = [];
+  const audioLevels: Array<number | undefined> = [];
   let encoderOptions: Parameters<CodecFactory["newEncoder"]>[0] | undefined;
   const transport: CallTransport = {
     audioProfile: {
@@ -262,8 +458,9 @@ Deno.test("CallSession.sendStream follows a transport 40ms voice profile", async
     },
     connect: () => Promise.resolve(),
     close: () => Promise.resolve(),
-    send(packet) {
+    send(packet, options) {
       sent.push(packet);
+      audioLevels.push(options?.audioLevel);
     },
     async *receive() {},
   };
@@ -284,11 +481,12 @@ Deno.test("CallSession.sendStream follows a transport 40ms voice profile", async
   const session = new CallSession(client, { to: "u-p", transport, codecs });
   await session.start();
   const samples = new Int16Array(1920);
-  samples.fill(123);
+  for (let i = 0; i < samples.length; i++) samples[i] = i % 2 ? 123 : -123;
 
   await session.sendStream(bufferSource({ samples, sampleRate: 48000, frameDurationMs: 20 }));
 
   assertEquals(sent.length, 1);
+  assertEquals(audioLevels, [49]);
   assertEquals(encodedLengths, [1920]);
   assertEquals(encoderOptions?.frameDurationMs, 40);
   assertEquals(encoderOptions?.bitrate, 16000);
