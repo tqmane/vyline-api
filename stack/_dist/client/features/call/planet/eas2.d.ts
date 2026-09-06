@@ -6,4 +6,6 @@
  * Opus frame-count bits with speech/config flags; never decode it as Opus.
  */
 export declare function packetizeEas2(opus: Uint8Array): Uint8Array;
+/** Aggregate up to six of our 20ms Opus frames (native ptime 20..120ms). */
+export declare function packetizeEas2Frames(frames: readonly Uint8Array[]): Uint8Array;
 export declare function depacketizeEas2(payload: Uint8Array): Uint8Array[];

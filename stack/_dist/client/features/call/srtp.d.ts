@@ -31,4 +31,6 @@ export declare function parseRtp(pkt: Uint8Array): {
     ssrc: number;
     marker: boolean;
     payload: Uint8Array;
+    extensionProfile?: number;
+    extensionData?: Uint8Array;
 };

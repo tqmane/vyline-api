@@ -232,20 +232,34 @@ export function parseRtp(pkt: Uint8Array): {
   ssrc: number;
   marker: boolean;
   payload: Uint8Array;
+  extensionProfile?: number;
+  extensionData?: Uint8Array;
 } {
-  if (pkt.length < 12) throw new Error("RTP too short");
+  const offset = rtpHeaderLength(pkt);
+  const padding = pkt[0] & 0x20 ? pkt[pkt.length - 1] : 0;
+  if (pkt[0] & 0x20 && (padding === 0 || padding > pkt.length - offset)) {
+    throw new Error("Invalid RTP padding");
+  }
+  const extensionOffset = 12 + (pkt[0] & 0x0f) * 4;
   return {
     payloadType: pkt[1] & 0x7f,
     marker: (pkt[1] & 0x80) !== 0,
     seq: readU16(pkt, 2),
     timestamp: readU32(pkt, 4),
     ssrc: readU32(pkt, 8),
-    payload: pkt.subarray(rtpHeaderLength(pkt)),
+    payload: pkt.subarray(offset, pkt.length - padding),
+    ...(pkt[0] & 0x10
+      ? {
+          extensionProfile: readU16(pkt, extensionOffset),
+          extensionData: pkt.subarray(extensionOffset + 4, offset),
+        }
+      : {}),
   };
 }
 
 function rtpHeaderLength(pkt: Uint8Array): number {
   if (pkt.length < 12) throw new Error("RTP too short");
+  if (pkt[0] >>> 6 !== 2) throw new Error("Invalid RTP version");
   const csrcCount = pkt[0] & 0x0f;
   let offset = 12 + csrcCount * 4;
   if (pkt.length < offset) throw new Error("RTP CSRC header truncated");

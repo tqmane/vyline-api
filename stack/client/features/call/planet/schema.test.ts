@@ -50,6 +50,20 @@ import {
   wrapMcMsg,
 } from "./schema.ts";
 
+Deno.test("conference/control protobuf rejects truncated and overflowing fields", () => {
+  for (const bytes of [[], [0x80], new Array(11).fill(0x80), [...new Array(9).fill(0xff), 2]]) {
+    assertThrows(() => decodeVarint(new Uint8Array(bytes), 0));
+  }
+  for (const bytes of [[0, 0], [0x0a, 2, 1], [0x0a, 0x80], [0x0d, 1, 2, 3], [0x09, 1], [0x08]]) {
+    assertThrows(() => decodeFields(new Uint8Array(bytes)));
+  }
+  assertEquals(decodeVarint(new Uint8Array([...new Array(9).fill(0xff), 1]), 0), [
+    (1n << 64n) - 1n,
+    10,
+  ]);
+  assertThrows(() => decodeFields(Uint8Array.from({ length: 8194 }, (_, i) => (i % 2 ? 0 : 8))));
+});
+
 Deno.test("VP8 normal-video offer preserves audio and marks initial video separately", () => {
   const material = {
     mediaPubKey: new Uint8Array(33),

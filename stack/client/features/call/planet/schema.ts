@@ -43,17 +43,19 @@ export function encodeVarint(v: bigint | number): Uint8Array {
 }
 
 export function decodeVarint(buf: Uint8Array, off: number): [bigint, number] {
-  let v = 0n,
-    shift = 0n,
-    i = off;
-  while (i < buf.length) {
+  if (!Number.isInteger(off) || off < 0) throw new Error("Invalid protobuf offset");
+  let v = 0n;
+  let shift = 0n;
+  let i = off;
+  while (i < buf.length && i - off < 10) {
     const b = BigInt(buf[i]);
+    if (i - off === 9 && b > 1n) throw new Error("Protobuf varint exceeds uint64");
     v |= (b & 0x7fn) << shift;
     shift += 7n;
     i++;
-    if ((b & 0x80n) === 0n) break;
+    if ((b & 0x80n) === 0n) return [v, i - off];
   }
-  return [v, i - off];
+  throw new Error("Truncated protobuf varint");
 }
 
 function fixed64(v: bigint): Uint8Array {
@@ -1372,9 +1374,11 @@ export function decodeFields(buf: Uint8Array): DecodedField[] {
   const out: DecodedField[] = [];
   let i = 0;
   while (i < buf.length) {
+    if (out.length >= 4096) throw new Error("Too many protobuf fields");
     const [k, kl] = decodeVarint(buf, i);
     i += kl;
     const tag = Number(k >> 3n);
+    if (tag < 1 || tag > 0x1fffffff) throw new Error("Invalid protobuf field number");
     const wt = Number(k & 7n) as WireType;
     if (wt === WireType.Varint) {
       const [v, vl] = decodeVarint(buf, i);
@@ -1383,12 +1387,15 @@ export function decodeFields(buf: Uint8Array): DecodedField[] {
     } else if (wt === WireType.LengthDelim) {
       const [len, ll] = decodeVarint(buf, i);
       i += ll;
+      if (len > BigInt(buf.length - i)) throw new Error("Truncated protobuf bytes");
       out.push({ tag, wireType: wt, value: buf.subarray(i, i + Number(len)) });
       i += Number(len);
     } else if (wt === WireType.Fixed64) {
+      if (i + 8 > buf.length) throw new Error("Truncated protobuf fixed64");
       out.push({ tag, wireType: wt, value: readFixed64(buf, i) });
       i += 8;
     } else if (wt === WireType.Fixed32) {
+      if (i + 4 > buf.length) throw new Error("Truncated protobuf fixed32");
       out.push({ tag, wireType: wt, value: buf.subarray(i, i + 4) });
       i += 4;
     } else throw new Error(`decodeFields: unknown wire type ${wt}`);
