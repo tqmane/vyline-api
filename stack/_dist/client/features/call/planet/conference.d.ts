@@ -13,6 +13,12 @@ export interface ConferenceMember {
  */
 export declare class ConferenceState {
     #private;
+    hasChannel(id: number): boolean;
+    get videoSources(): Array<{
+        mid: string;
+        ssrc: number;
+        channel: number;
+    }>;
     get members(): ConferenceMember[];
     accept(container: Uint8Array): boolean;
     /** PARTICIPATE_RSP.contents carries raw conference_info, not the PDTP wrapper. */

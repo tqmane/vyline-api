@@ -868,6 +868,20 @@ export function decodeCcRelReq(bytes: Uint8Array): CcRelReq {
   };
 }
 
+// Native cc_push_req: contents are the same conference_info as PARTICIPATE_RSP.
+export function decodeCcPushReq(bytes: Uint8Array): {
+  contentsType?: number;
+  contents?: Uint8Array;
+  compContentsType?: number;
+} {
+  const fields = decodeFields(bytes);
+  return {
+    contentsType: asNumberField(fields, 1),
+    contents: asBytesField(fields, 2),
+    compContentsType: asNumberField(fields, 3),
+  };
+}
+
 // ─── planet_mc_msg / mc_data_req — group media-control bootstrap ───────
 
 export interface PlanetMcHdr {
@@ -937,6 +951,66 @@ export function decodeMcDataRsp(bytes: Uint8Array): McDataRsp {
     dispatchId: asNumberField(fields, 4),
     data: asBytesField(fields, 5),
   };
+}
+
+/** Native standalone MC STRM_REQ (0x318d): auto VP8, VGA receive layer. */
+export function packMcStrmReq(
+  sequence: number,
+  requests: Array<{ ssrc: number; channel: number; start: boolean }>,
+): Uint8Array {
+  if (
+    requests.length > 60 ||
+    [sequence, ...requests.flatMap((r) => [r.ssrc, r.channel])].some(
+      (v) => !Number.isInteger(v) || v < 0 || v > 0xffffffff,
+    )
+  )
+    throw new Error("Invalid stream subscription");
+  const b: Buf = { bytes: [] };
+  for (const request of requests) {
+    const record: Buf = { bytes: [] };
+    const layer: Buf = { bytes: [] };
+    emitEnum(record, 1, request.start ? 1 : 0);
+    emitUint32(record, 3, request.ssrc);
+    emitEnum(record, 5, request.start ? 1 : 0);
+    emitEnum(record, 6, 0);
+    emitUint32(record, 7, request.channel);
+    emitEnum(layer, 1, 2);
+    emitEnum(layer, 2, 0);
+    emitMessage(record, 8, finalize(layer));
+    emitMessage(b, 1, finalize(record));
+  }
+  emitUint32(b, 2, sequence);
+  return finalize(b);
+}
+
+/** NOTIFY_STRM_REQ.strm_info; validate the entire update before applying it. */
+export function decodeMcNotifyStrmReq(bytes: Uint8Array): Array<{
+  state: 0 | 1 | 2;
+  ssrc: number;
+  channel: number;
+  mid?: string;
+}> {
+  if (bytes.length > 65536) throw new Error("Stream notification too large");
+  const records = decodeFields(bytes).filter((f) => f.tag === 1);
+  if (records.length > 512) throw new Error("Too many stream notifications");
+  return records.map((record) => {
+    if (!(record.value instanceof Uint8Array)) throw new Error("Invalid stream notification");
+    const fields = decodeFields(record.value);
+    for (const tag of [1, 2, 3, 5])
+      if (fields.filter((f) => f.tag === tag).length > 1) throw new Error("Duplicate stream field");
+    const numbers = [1, 3, 5].map((tag) => {
+      const value = fields.find((f) => f.tag === tag)?.value;
+      if (typeof value !== "bigint" || value < 0n || value > 0xffffffffn)
+        throw new Error("Invalid stream integer");
+      return Number(value);
+    });
+    const [state, ssrc, channel] = numbers;
+    const uid = fields.find((f) => f.tag === 2)?.value;
+    const mid = uid instanceof Uint8Array ? new TextDecoder().decode(uid) : undefined;
+    if (state > 2 || (uid !== undefined && (!mid || !/^u[0-9a-f]{32}$/.test(mid))))
+      throw new Error("Invalid stream identity/state");
+    return { state: state as 0 | 1 | 2, ssrc, channel, mid };
+  });
 }
 
 export interface PlanetUeInfo {
@@ -1999,6 +2073,7 @@ export interface NativeSetupMediaRecord {
   kind?: number;
   /** All advertised pmap values, not only the first codec. */
   kinds?: number[];
+  features?: Array<{ id?: number; version?: number }>;
   rtpId?: number;
   /** Native local_srcid (SSRC), despite the legacy property name. */
   rtpPort?: number;
@@ -2034,6 +2109,12 @@ export function decodeNativeSetupOffer(bytes: Uint8Array): NativeSetupOffer {
         bitrate: asNumberField(codec, 4),
         kind: asNumberField(codec, 50),
         kinds: repeatedNumbers(codec, 50),
+        features: item
+          .filter((field) => field.tag === 51 && field.value instanceof Uint8Array)
+          .map((field) => {
+            const feature = decodeFields(field.value as Uint8Array);
+            return { id: asNumberField(feature, 1), version: asNumberField(feature, 2) };
+          }),
         rtpId: asNumberField(path, 1),
         rtpPort: asNumberField(path, 11),
         rtcpId: asNumberField(path, 61),

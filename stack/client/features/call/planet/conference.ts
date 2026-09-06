@@ -50,6 +50,18 @@ function messages(fields: DecodedField[], tag: number): Uint8Array[] {
     });
 }
 
+function sourceList(entries: Uint8Array[]): ConferenceMember["sources"] {
+  if (entries.length > 32) throw new Error("Too many conference sources");
+  return entries.map((source) => {
+    const fields = decodeFields(source);
+    const name = new TextDecoder().decode(bytes(fields, 1));
+    const ssrc = uint(fields, 2);
+    if (!/^[ -~]{1,64}$/.test(name) || ssrc === undefined)
+      throw new Error("Invalid conference source");
+    return { name, ssrc };
+  });
+}
+
 function member(data: Uint8Array): ConferenceMember {
   const fields = decodeFields(data);
   const mid = new TextDecoder().decode(bytes(fields, 1));
@@ -58,20 +70,11 @@ function member(data: Uint8Array): ConferenceMember {
     // Windows 0x5eab73 requires has_connect; absence is not a leave event.
     throw new Error("Invalid conference member");
   }
-  const sources = messages(fields, 10);
-  if (sources.length > 32) throw new Error("Too many conference sources");
   return {
     mid,
     connected: connected === 1,
     mediaFlags: uint(fields, 2) ?? 0,
-    sources: sources.map((source) => {
-      const fields = decodeFields(source);
-      const name = new TextDecoder().decode(bytes(fields, 1));
-      const ssrc = uint(fields, 2);
-      if (!/^[ -~]{1,64}$/.test(name) || ssrc === undefined)
-        throw new Error("Invalid conference source");
-      return { name, ssrc };
-    }),
+    sources: sourceList(messages(fields, 10)),
   };
 }
 
@@ -82,6 +85,31 @@ function member(data: Uint8Array): ConferenceMember {
 export class ConferenceState {
   #version: number | undefined;
   #members = new Map<string, ConferenceMember>();
+  #channels = new Map<
+    number,
+    { version: number; members: Map<string, ConferenceMember["sources"]> }
+  >();
+
+  hasChannel(id: number): boolean {
+    return this.#channels.has(id);
+  }
+
+  get videoSources(): Array<{ mid: string; ssrc: number; channel: number }> {
+    const result: Array<{ mid: string; ssrc: number; channel: number }> = [];
+    for (const [channel, state] of this.#channels) {
+      for (const [mid, sources] of state.members) {
+        const member = this.#members.get(mid);
+        for (const source of sources) {
+          if (
+            source.name === "V" &&
+            member?.sources.some((s) => s.name === "V" && s.ssrc === source.ssrc)
+          )
+            result.push({ mid, ssrc: source.ssrc, channel });
+        }
+      }
+    }
+    return result;
+  }
 
   get members(): ConferenceMember[] {
     return [...this.#members.values()].map((member) => ({
@@ -97,9 +125,40 @@ export class ConferenceState {
     let message = bytes(wrapper, 2);
     if (!message) throw new Error("Conference message missing");
     message = uncompress(message, compression);
-    const conference = bytes(decodeFields(message), 1);
-    if (!conference) return false; // Other notifier messages are unrelated to roster state.
-    return this.acceptInfo(conference);
+    const fields = decodeFields(message);
+    const conference = bytes(fields, 1);
+    const channel = bytes(fields, 2);
+    const update = channel ? this.#readChannel(channel) : undefined;
+    const changed = conference ? this.acceptInfo(conference) : false;
+    if (update) this.#channels.set(update.id, update.state);
+    return changed || update !== undefined;
+  }
+
+  #readChannel(data: Uint8Array) {
+    const fields = decodeFields(data);
+    const id = uint(fields, 2);
+    const version = uint(fields, 1);
+    if (id === undefined || version === undefined)
+      throw new Error("Channel identity/version missing");
+    const previous = this.#channels.get(id);
+    if (previous?.version && version !== 0 && version <= previous.version) return;
+    if (!previous && this.#channels.size >= 30) throw new Error("Too many conference channels");
+    const entries = messages(fields, 11);
+    if (entries.length > 512) throw new Error("Too many channel members");
+    const members = new Map(previous?.members);
+    const seen = new Set<string>();
+    for (const entry of entries) {
+      const values = decodeFields(entry);
+      const mid = new TextDecoder().decode(bytes(values, 1));
+      const state = uint(values, 3);
+      if (!/^u[0-9a-f]{32}$/.test(mid) || state === undefined || state > 2 || seen.has(mid))
+        throw new Error("Invalid channel member");
+      seen.add(mid);
+      if (state === 0) members.delete(mid);
+      else members.set(mid, sourceList(messages(values, 11)));
+    }
+    if (members.size > 512) throw new Error("Too many channel members");
+    return { id, state: { version, members } };
   }
 
   /** PARTICIPATE_RSP.contents carries raw conference_info, not the PDTP wrapper. */

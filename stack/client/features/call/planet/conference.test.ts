@@ -99,3 +99,37 @@ Deno.test("conference seeds existing members from PARTICIPATE contents before no
   assertThrows(() => state.acceptInfo(deflateSync(new Uint8Array(262145)), 1));
   assertThrows(() => state.acceptInfo(compressed, 2));
 });
+
+Deno.test("conference maps video sources to explicit channel IDs with independent versioning", () => {
+  const state = new ConferenceState();
+  const source = encodePb([string(1, "V"), scalar(2, 33)]);
+  const user = encodePb([string(1, mid(1)), scalar(3, 1), bytes(10, source)]);
+  state.accept(notification(1, true, [user]));
+  const channel = (version: number, memberState: number, channelId?: number) =>
+    encodePb([
+      bytes(
+        2,
+        encodePb([
+          bytes(
+            2,
+            encodePb([
+              scalar(1, version),
+              ...(channelId === undefined ? [] : [scalar(2, channelId)]),
+              bytes(11, encodePb([string(1, mid(1)), scalar(3, memberState), bytes(11, source)])),
+            ]),
+          ),
+        ]),
+      ),
+    ]);
+  assertEquals(state.accept(channel(1, 1, 42)), true);
+  assertEquals(state.videoSources, [{ mid: mid(1), ssrc: 33, channel: 42 }]);
+  assertEquals(state.accept(channel(1, 0, 42)), false);
+  assertEquals(state.accept(channel(2, 0, 42)), true);
+  assertEquals(state.videoSources, []);
+  assertEquals(state.accept(channel(0, 2, 0)), true); // Explicit 0 is valid, absence is not.
+  assertEquals(state.videoSources, [{ mid: mid(1), ssrc: 33, channel: 0 }]);
+  assertThrows(() => state.accept(channel(3, 1)));
+  assertThrows(() => state.accept(channel(3, 3, 0)));
+  state.accept(notification(2, false, [member(1, false)]));
+  assertEquals(state.videoSources, []);
+});

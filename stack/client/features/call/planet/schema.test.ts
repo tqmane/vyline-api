@@ -1,4 +1,5 @@
 import { assertEquals, assertThrows } from "@vyline/protocol/stack/assert";
+import * as schema from "./schema.ts";
 import {
   CC_MSG,
   decodeCcConnReq,
@@ -49,6 +50,47 @@ import {
   wrapCcMsg,
   wrapMcMsg,
 } from "./schema.ts";
+
+Deno.test("group stream subscription uses explicit channel and native notification fields", () => {
+  const packed = schema.packMcStrmReq(9, [{ ssrc: 31, channel: 42, start: true }]);
+  const outer = decodeFields(packed);
+  assertEquals(outer.find((f) => f.tag === 2)?.value, 9n);
+  const fields = decodeFields(outer.find((f) => f.tag === 1)!.value as Uint8Array);
+  assertEquals(
+    fields.filter((f) => f.wireType === 0).map((f) => [f.tag, f.value]),
+    [
+      [1, 1n],
+      [3, 31n],
+      [5, 1n],
+      [6, 0n],
+      [7, 42n],
+    ],
+  );
+  assertEquals(
+    fields.some((f) => f.tag === 2),
+    false,
+  ); // Native omits uid in STRM_REQ.
+  assertEquals(
+    decodeFields(fields.find((f) => f.tag === 8)!.value as Uint8Array).map((f) => [f.tag, f.value]),
+    [
+      [1, 2n],
+      [2, 0n],
+    ],
+  );
+  assertThrows(() => schema.packMcStrmReq(1, [{ ssrc: -1, channel: 0, start: true }]));
+  assertThrows(() =>
+    schema.packMcStrmReq(1, [{ ssrc: 1, channel: undefined as unknown as number, start: true }]),
+  );
+  assertEquals(schema.decodeMcNotifyStrmReq(new Uint8Array([10, 6, 8, 1, 24, 31, 40, 42])), [
+    { state: 1, ssrc: 31, channel: 42, mid: undefined },
+  ]);
+  for (const body of [
+    [10, 4, 8, 1, 24, 31],
+    [10, 6, 8, 3, 24, 31, 40, 42],
+    [10, 8, 8, 1, 8, 2, 24, 31, 40, 42],
+  ])
+    assertThrows(() => schema.decodeMcNotifyStrmReq(new Uint8Array(body)));
+});
 
 Deno.test("conference/control protobuf rejects truncated and overflowing fields", () => {
   for (const bytes of [[], [0x80], new Array(11).fill(0x80), [...new Array(9).fill(0xff), 2]]) {
@@ -336,6 +378,10 @@ Deno.test("packNativeGroupParticipateOffer emits group media records", () => {
     [203, 213, 223],
   );
   assertEquals(decoded.mediaSecret, new Uint8Array(30).fill(7));
+  assertEquals(decoded.media.find((m) => m.name === "V")?.features, [
+    { id: 0, version: 2 },
+    { id: 2, version: 1 },
+  ]);
   assertEquals(decoded.mediaPubKey, undefined);
   assertEquals(decoded.version, { major: 0, mode: 3 });
 });
