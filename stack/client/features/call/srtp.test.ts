@@ -129,3 +129,27 @@ Deno.test("srtpDecrypt rejects tampered tag", async () => {
   enc[enc.length - 1] ^= 0xff;
   await assertRejects(() => srtpDecrypt(ctx, enc), Error, "auth tag mismatch");
 });
+
+Deno.test("SRTP receive tracks sequence rollover, late packets and failed authentication", async () => {
+  const key = new Uint8Array(30).fill(19);
+  const tx = await deriveSrtpContext(key);
+  const rx = await deriveSrtpContext(key);
+  const packets = new Map<number, Uint8Array>();
+  for (const seq of [65534, 65535, 0, 1, 2]) {
+    packets.set(
+      seq,
+      await srtpEncrypt(
+        tx,
+        buildRtp({ payloadType: 97, ssrc: 111, seq, timestamp: 1, payload: new Uint8Array([1]) }),
+      ),
+    );
+  }
+  assertEquals(parseRtp(await srtpDecrypt(rx, packets.get(65534)!)).seq, 65534);
+  const forged = packets.get(0)!.slice();
+  forged[forged.length - 1] ^= 1;
+  await assertRejects(() => srtpDecrypt(rx, forged), Error, "auth tag mismatch");
+  for (const seq of [0, 65535, 1, 2]) {
+    assertEquals(parseRtp(await srtpDecrypt(rx, packets.get(seq)!)).seq, seq);
+  }
+  assertEquals(rx.rocs.get(111), 1);
+});
