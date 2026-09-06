@@ -123,6 +123,35 @@ Deno.test("CallSession.start is idempotent", async () => {
   assertEquals(r1, r2);
 });
 
+Deno.test("CallSession starts VIDEO and toggles its media without replacing audio or route", async () => {
+  const { client, acquired } = fakeClient();
+  const transport = recordingTransport();
+  const controls: boolean[] = [];
+  let initialKind: string | undefined;
+  const videoTransport = {
+    ...transport,
+    videoAvailable: true,
+    connect: async (opts: { kind?: string }) => {
+      initialKind = opts.kind;
+    },
+    setVideoEnabled: async (enabled: boolean) => {
+      controls.push(enabled);
+    },
+  };
+  const session = new CallSession(client, { to: "u-p", kind: "VIDEO", transport: videoTransport });
+  await session.start();
+  await session.setVideoEnabled(true);
+  await session.setVideoEnabled(false);
+  assertEquals(
+    [initialKind, acquired.length, session.state, session.kind],
+    ["VIDEO", 1, "in-call", "VIDEO"],
+  );
+  assertEquals(controls, [true, false]);
+  assertEquals(session.videoState, { available: true, localEnabled: false, remoteEnabled: false });
+  await session.end();
+  await assertRejects(() => session.setVideoEnabled(true), Error, "not in-call");
+});
+
 Deno.test("CallSession.start closes the transport when signaling fails", async () => {
   const { client } = fakeClient();
   let closeCalls = 0;

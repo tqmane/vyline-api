@@ -1,4 +1,4 @@
-import { assertEquals } from "@vyline/protocol/stack/assert";
+import { assertEquals, assertThrows } from "@vyline/protocol/stack/assert";
 import {
   CC_MSG,
   decodeCcConnReq,
@@ -31,6 +31,8 @@ import {
   packMcDataReq,
   packMcDataRsp,
   packMcDataSessionPayload,
+  packMcStreamControl,
+  decodeMcStreamControl,
   packNativeGroupParticipateOffer,
   packNativeSetupOffer,
   packPlanetCcHdr,
@@ -47,6 +49,49 @@ import {
   wrapCcMsg,
   wrapMcMsg,
 } from "./schema.ts";
+
+Deno.test("AVC-only offer preserves audio and marks initial video separately", () => {
+  const material = {
+    mediaPubKey: new Uint8Array(33),
+    mediaKeyId: 1,
+    mediaNonce: new Uint8Array(16),
+    mediaSecret: new Uint8Array(30),
+  };
+  for (const enabled of [false, true]) {
+    const offer = decodeNativeSetupOffer(packNativeSetupOffer(material, "simple", { enabled }));
+    assertEquals(
+      offer.media.map((m) => [m.name, m.enabled, m.kinds]),
+      [
+        ["A", 1, [1]],
+        ["V", Number(enabled), [3]],
+        ["D", 1, [6]],
+      ],
+    );
+    assertEquals(offer.media.find((m) => m.name === "V")?.rtpPort, 111);
+    assertEquals(offer.mediaPubKey, undefined);
+  }
+});
+
+Deno.test("MCMMD video START uses native big-endian control layout and rejects truncation", () => {
+  const data = packMcStreamControl({ operation: 1, ssrcs: [111, 211], mediaKind: 2, code: 0 });
+  assertEquals(
+    data,
+    new Uint8Array([
+      0, 1, 0, 0, 0, 20, 0, 0, 0, 1, 0, 2, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 111, 0, 0, 0, 211,
+    ]),
+  );
+  assertEquals(decodeMcStreamControl(data), {
+    operation: 1,
+    ssrcs: [111, 211],
+    mediaKind: 2,
+    code: 0,
+  });
+  assertEquals(decodeMcStreamControl(packMcDataSessionPayload(new Uint8Array([1]))), undefined);
+  for (let i = 0; i < data.length; i++) assertThrows(() => decodeMcStreamControl(data.slice(0, i)));
+  const badCount = data.slice();
+  badCount[11] = 3;
+  assertThrows(() => decodeMcStreamControl(badCount));
+});
 
 Deno.test("packPlanetMsgHdr matches an observed 96-byte header shape", () => {
   // Reproduce an observed msg_pack header shape without account-specific

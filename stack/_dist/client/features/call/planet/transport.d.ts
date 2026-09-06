@@ -14,7 +14,8 @@
  *   6. close(): send REL_REQ
  */
 import type * as LINETypes from "@vyline/line-types";
-import type { CallAudioProfile, CallTransport } from "../session.ts";
+import type { CallAudioProfile, CallKind, CallTransport } from "../session.ts";
+import { type EncodedVideoFrame } from "./evs3.js";
 import { type EphemeralKeypair } from "./crypto.js";
 import { type CcConnReq, decodeCcConnRsp, decodeCcParticipateRsp, decodeCcSetupRsp, decodeCcVerifyRsp, decodePlanetMsg, type NativeSetupOffer, type PlanetSetupOfferMaterial, type PlanetUserAgent } from "./schema.js";
 export interface PlanetTransportOpts {
@@ -86,14 +87,17 @@ export interface PlanetLocalMediaOffer {
 }
 export declare class PlanetTransport implements CallTransport {
     #private;
+    onVideoState?: (enabled: boolean) => void;
     constructor(opts: PlanetTransportOpts);
     /** True after the peer released the call (REL_REQ). receive() then terminates. */
     get remoteEnded(): boolean;
     get remoteEndReason(): string | undefined;
     get audioProfile(): CallAudioProfile | undefined;
+    get videoAvailable(): boolean;
     get localMediaOffer(): PlanetLocalMediaOffer | undefined;
     connect(opts: {
         route: LINETypes.CallRoute | LINETypes.GroupCallRoute;
+        kind?: CallKind;
     }): Promise<void>;
     inviteDetailed(opts: {
         to: string;
@@ -123,5 +127,8 @@ export declare class PlanetTransport implements CallTransport {
     send(opusPacket: Uint8Array, opts?: {
         timestampStep?: number;
     }): Promise<void>;
+    setVideoEnabled(enabled: boolean): Promise<void>;
+    sendVideo(frame: EncodedVideoFrame): Promise<void>;
+    receiveVideo(): AsyncIterable<EncodedVideoFrame>;
     receive(): AsyncIterable<Uint8Array>;
 }
