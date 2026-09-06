@@ -2125,6 +2125,11 @@ export class PlanetTransport implements CallTransport {
     const audio =
       peerOffer.media.find((m) => m.name === "A" && m.enabled !== 0 && m.rtpId !== undefined) ??
       peerOffer.media.find((m) => m.kind === 1 && m.enabled !== 0 && m.rtpId !== undefined);
+    // The answerer's local_srcid is the caller's RX stream. Using the peer's
+    // remote_srcid here hits its TX stream and native drops it before decoding.
+    const answeredAudio = this.#incomingCall
+      ? decodeNativeSetupOffer(local.offer).media.find((m) => m.name === "A")
+      : undefined;
     if (this.#groupJoined) {
       this.#groupRtcpSsrc = GROUP_RTCP_SENDER_SSRC;
     }
@@ -2134,7 +2139,7 @@ export class PlanetTransport implements CallTransport {
       payloadType: audio?.rtpId ?? 96,
       ssrc:
         (this.#groupJoined ? this.#groupAudioSsrc : undefined) ??
-        audio?.rtcpId ??
+        (this.#incomingCall ? answeredAudio?.rtpPort : audio?.rtcpId) ??
         audio?.rtpPort ??
         randomU32(),
       seq: randomIntInclusive(0, 0xffff),

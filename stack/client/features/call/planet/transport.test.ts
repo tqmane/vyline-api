@@ -351,6 +351,7 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
   const sessId = new Uint8Array(16).fill(0x62);
   let serverSendKeys: TransportKeys | undefined;
   let advertisedDeviceId: string | undefined;
+  let sentAudioSsrc: number | undefined;
   const sentCcTags: number[] = [];
   const sentMsgIds: number[] = [];
   const debugEvents: Record<string, unknown>[] = [];
@@ -394,6 +395,10 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
     timeoutMs: 500,
     debug: (event) => debugEvents.push(event),
     wireSend(packet, endpoint) {
+      if (endpoint.plaintext.length === 4 && endpoint.plaintext[0] === 0x10) {
+        sentAudioSsrc = parseRtp(packet).ssrc;
+        return;
+      }
       if (endpoint.plaintext.length === 519 || endpoint.plaintext.length === 10) return;
       let msg: ReturnType<typeof decodePlanetMsg>;
       try {
@@ -477,6 +482,8 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
   assertEquals(sentCcTags.includes(CC_MSG.SETUP_REQ), false);
   assertEquals(sentCcTags.includes(CC_MSG.CONN_REQ), true);
   assertEquals(sentMsgIds.slice(0, 2), [0x2142, 0x2144]);
+  await transport.send(new Uint8Array([0xf8, 0xff, 0xfd]));
+  assertEquals(sentAudioSsrc, 101);
   await transport.close();
 });
 

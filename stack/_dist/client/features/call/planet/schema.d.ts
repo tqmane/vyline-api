@@ -604,7 +604,9 @@ export interface NativeSetupMediaRecord {
     bitrate?: number;
     kind?: number;
     rtpId?: number;
+    /** Native local_srcid (SSRC), despite the legacy property name. */
     rtpPort?: number;
+    /** Native remote_srcid (SSRC), despite the legacy property name. */
     rtcpId?: number;
     raw: Uint8Array;
 }
