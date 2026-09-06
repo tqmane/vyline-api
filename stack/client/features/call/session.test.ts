@@ -123,6 +123,55 @@ Deno.test("CallSession.start is idempotent", async () => {
   assertEquals(r1, r2);
 });
 
+Deno.test("CallSession starts VIDEO and toggles its media without replacing audio or route", async () => {
+  const { client, acquired } = fakeClient();
+  const transport = recordingTransport();
+  const controls: boolean[] = [];
+  let initialKind: string | undefined;
+  const videoTransport = {
+    ...transport,
+    videoAvailable: true,
+    connect: async (opts: { kind?: string }) => {
+      initialKind = opts.kind;
+    },
+    setVideoEnabled: async (enabled: boolean) => {
+      controls.push(enabled);
+    },
+  };
+  const session = new CallSession(client, { to: "u-p", kind: "VIDEO", transport: videoTransport });
+  await session.start();
+  await session.setVideoEnabled(true);
+  await session.setVideoEnabled(false);
+  assertEquals(
+    [initialKind, acquired.length, session.state, session.kind],
+    ["VIDEO", 1, "in-call", "VIDEO"],
+  );
+  assertEquals(controls, [true, false]);
+  assertEquals(session.videoState, { available: true, localEnabled: false, remoteEnabled: false });
+  await session.end();
+  await assertRejects(() => session.setVideoEnabled(true), Error, "not in-call");
+});
+
+Deno.test("CallSession does not show delayed video after peer camera pause", async () => {
+  const transport: CallTransport = {
+    ...recordingTransport(), videoAvailable: true,
+    async *receiveVideo() {
+      yield { data: new Uint8Array([1]), key: true, timestamp: 0 };
+      transport.onVideoState?.(false);
+      yield { data: new Uint8Array([1]), key: true, timestamp: 1 };
+      transport.onVideoState?.(true);
+      yield { data: new Uint8Array([1]), key: false, timestamp: 2 };
+      yield { data: new Uint8Array([1]), key: true, timestamp: 3 };
+    },
+  };
+  const session = new CallSession(fakeClient().client, { to: "u-p", transport });
+  await session.start();
+  const timestamps: number[] = [];
+  for await (const frame of session.receivedVideo()) timestamps.push(frame.timestamp);
+  assertEquals(timestamps, [0, 3]);
+  await session.end();
+});
+
 Deno.test("CallSession.start closes the transport when signaling fails", async () => {
   const { client } = fakeClient();
   let closeCalls = 0;

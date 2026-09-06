@@ -22,6 +22,8 @@ import {
   decodeCcConnReq,
   decodeFields,
   decodeMcDataRsp,
+  decodeMcDataReq,
+  decodeMcStreamControl,
   decodePlanetMsg,
   MC_MSG,
   packCcConnReq,
@@ -31,6 +33,7 @@ import {
   packCcSetupRsp,
   packCcVerifyRsp,
   packMcDataReq,
+  packMcDataRsp,
   packNativeGroupParticipateOffer,
   packNativeSetupOffer,
   packPlanetCcMsg,
@@ -43,6 +46,7 @@ import {
 } from "./schema.ts";
 import { PlanetTransport } from "./transport.ts";
 import { depacketizeEas2 } from "./eas2.ts";
+import { Evs3Assembler, packetizeEvs3 } from "./evs3.ts";
 import { buildRtp, deriveSrtpContext, parseRtp, srtpDecrypt, srtpEncrypt } from "../srtp.ts";
 
 type CallRouteLike = Parameters<PlanetTransport["connect"]>[0]["route"];
@@ -513,7 +517,7 @@ Deno.test("PlanetTransport.answer selects one SRTP scheme for a simple-only peer
 Deno.test("PlanetTransport.answer refuses a peer offering no encrypted media", () =>
   testIncomingAnswer("none"));
 
-async function testPeerAudio(peerSecurity: "ecdh" | "simple" | "simple-only") {
+async function testPeerAudio(peerSecurity: "ecdh" | "simple" | "simple-only", video = false) {
   const routePeer = generateEphemeralKeypair();
   const server = await bindUdpServer();
   const mediaServer = await bindUdpServer();
@@ -560,7 +564,7 @@ async function testPeerAudio(peerSecurity: "ecdh" | "simple" | "simple-only") {
       answer:
         peerSecurity === "simple-only"
           ? packNativeGroupParticipateOffer({ mediaSecret: peerMaterial.mediaSecret })
-          : packNativeSetupOffer(peerMaterial),
+          : packNativeSetupOffer(peerMaterial, undefined, video ? { enabled: true } : undefined),
       mChanId: 0x2002n,
       netType: 1,
       unavailToSec: 120,
@@ -616,10 +620,12 @@ async function testPeerAudio(peerSecurity: "ecdh" | "simple" | "simple-only") {
   let setupHandled = false;
   let clientRinfo: RemoteInfo | undefined;
   let serverRecvKeys: TransportKeys | undefined;
+  let controlSendKeys: TransportKeys | undefined;
   let serverMessages = 0;
   let serverError: unknown;
   let connReqWireForRetry: Uint8Array | undefined;
   let connRspCount = 0;
+  const videoControls: unknown[] = [];
   const pinholePlainLengths: number[] = [];
   let resolveMedia!: (packet: Uint8Array) => void;
   let resolvePinholeReport!: () => void;
@@ -687,6 +693,30 @@ async function testPeerAudio(peerSecurity: "ecdh" | "simple" | "simple-only") {
           return;
         }
         const msg = decodePlanetMsg(plain);
+        if (msg.mc?.bodyTag === MC_MSG.DATA_REQ && msg.mc.bodyBytes) {
+          const req = decodeMcDataReq(msg.mc.bodyBytes);
+          if (req.data) videoControls.push(decodeMcStreamControl(req.data));
+          if (controlSendKeys && req.data) {
+            const response = packPlanetMsg(
+              { ...msg.hdr!, userId: "u-server", locNonce: 0x123456n, msgId: 0x3289 },
+              {
+                kind: "mc",
+                data: packPlanetMcMsg(
+                  { cid, srcChanId: 0x3003n, dstChanId: msg.mc.hdr?.srcChanId },
+                  wrapMcMsg(
+                    MC_MSG.DATA_RSP,
+                    packMcDataRsp({ result: 0, relCode: 0, dispatchId: 2, data: req.data }),
+                  ),
+                ),
+              },
+            );
+            void sendUdp(
+              server,
+              buildServerWire(controlSendKeys, response, 0x6100 + videoControls.length),
+              rinfo,
+            );
+          }
+        }
         if (msg.cc?.bodyTag === CC_MSG.CONN_RSP) {
           connRspCount++;
           if (connRspCount >= 2) resolveSecondConnRsp(msg.hdr);
@@ -729,6 +759,7 @@ async function testPeerAudio(peerSecurity: "ecdh" | "simple" | "simple-only") {
         sendLabel: replyLabel,
         recvLabel: replyLabel,
       }).send;
+      controlSendKeys = serverKeys;
       serverRecvKeys = deriveCallKeys({
         mpkey: clientPub,
         local: routePeer,
@@ -902,7 +933,65 @@ async function testPeerAudio(peerSecurity: "ecdh" | "simple" | "simple-only") {
     await sendUdp(mediaServer, remoteWire, clientRinfo);
     const remotePacket = await withTimeout(receivedAudio, 1000, "remote audio");
     assertEquals(remotePacket.value, remoteOpus);
-    await transport.close();
+    if (video) {
+      assertEquals(transport.videoAvailable, true);
+      const vp8 = new Uint8Array([0x30, 0, 0, 0x9d, 1, 0x2a, 0x80, 2, 0x68, 1, 0, 0]);
+      const peerVideoRecv = await deriveSrtpContext(
+        derivePlanetMediaStreamKeying(
+          peerSecurity === "ecdh" ? peerKeys.sendKeying : localMedia.material.mediaSecret,
+          "VIDEO",
+        ),
+      );
+      const peerVideoSend = await deriveSrtpContext(
+        derivePlanetMediaStreamKeying(
+          peerSecurity === "ecdh" ? peerKeys.recvKeying : peerMaterial.mediaSecret,
+          "VIDEO",
+        ),
+      );
+      await transport.setVideoEnabled(true);
+      await transport.sendVideo({ data: vp8, key: true, timestamp: 9000 });
+      const sentVideo = parseRtp(
+        await srtpDecrypt(peerVideoRecv, await withTimeout(getMediaWire(), 1000, "video send")),
+      );
+      assertEquals([sentVideo.payloadType, sentVideo.ssrc, sentVideo.timestamp], [97, 211, 9000]);
+      assertEquals(new Evs3Assembler().push(sentVideo)?.data, vp8);
+      const videoIterator = transport.receiveVideo()[Symbol.asyncIterator]();
+      const gotVideo = videoIterator.next();
+      const simultaneousAudio = transport.receive()[Symbol.asyncIterator]().next();
+      const incomingVideo = buildRtp({
+        payloadType: 97,
+        ssrc: 111,
+        seq: 20,
+        timestamp: 9000,
+        marker: true,
+        payload: packetizeEvs3(vp8, true, 1)[0],
+      });
+      const wrongKeyVideo = await srtpEncrypt(peerSend, incomingVideo);
+      await sendUdp(mediaServer, wrongKeyVideo, clientRinfo);
+      await sendUdp(mediaServer, await srtpEncrypt(peerVideoSend, incomingVideo), clientRinfo);
+      await sendUdp(mediaServer, remoteWire, clientRinfo);
+      assertEquals((await withTimeout(gotVideo, 1000, "video receive")).value?.data, vp8);
+      assertEquals(
+        (await withTimeout(simultaneousAudio, 1000, "audio while video")).value,
+        remoteOpus,
+      );
+      await transport.setVideoEnabled(false);
+      await assertRejects(
+        () => transport.sendVideo({ data: vp8, key: true, timestamp: 12000 }),
+        Error,
+        "not enabled",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      assertEquals(videoControls, [
+        { operation: 1, mediaKind: 2, code: 0, ssrcs: [211, 111] },
+        { operation: 3, mediaKind: 2, code: 0, ssrcs: [211] },
+      ]);
+      const closing = videoIterator.next();
+      await transport.close();
+      assertEquals((await withTimeout(closing, 1000, "video cleanup")).done, true);
+      transportClosed = true;
+    }
+    if (!transportClosed) await transport.close();
     transportClosed = true;
     assertEquals(await withTimeout(relReq, 1000, "rel_req"), {
       bodyTag: CC_MSG.REL_REQ,
@@ -921,6 +1010,10 @@ Deno.test("PlanetTransport authenticates simple audio before selecting keys and 
   testPeerAudio("simple"));
 Deno.test("PlanetTransport supports a peer selecting only the simple security scheme", () =>
   testPeerAudio("simple-only"));
+Deno.test("PlanetTransport upgrades encrypted ECDH video without disrupting audio", () =>
+  testPeerAudio("ecdh", true));
+Deno.test("PlanetTransport upgrades encrypted simple video without disrupting audio", () =>
+  testPeerAudio("simple", true));
 
 Deno.test("PlanetTransport ends media on remote REL_REQ (peer hangup)", async () => {
   const routePeer = generateEphemeralKeypair();

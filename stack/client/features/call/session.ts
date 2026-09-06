@@ -11,6 +11,7 @@ import type {
 } from "./audio.js";
 import { defaultCodecFactory } from "./audio.js";
 import { TypedEventEmitter } from "../../../base/core/typed-event-emitter/index.js";
+import type { EncodedVideoFrame } from "./planet/evs3.js";
 
 export type CallSessionState =
   | "idle"
@@ -45,7 +46,12 @@ export interface CallAudioProfile {
 
 export interface CallTransport {
   readonly audioProfile?: CallAudioProfile | undefined;
-  connect(opts: { route: LINETypes.CallRoute }): Promise<void>;
+  connect(opts: { route: LINETypes.CallRoute; kind?: CallKind }): Promise<void>;
+  readonly videoAvailable?: boolean;
+  onVideoState?: (enabled: boolean) => void;
+  setVideoEnabled?(enabled: boolean): Promise<void>;
+  sendVideo?(frame: EncodedVideoFrame): Promise<void>;
+  receiveVideo?(): AsyncIterable<EncodedVideoFrame>;
   close(): Promise<void>;
   send(packet: Uint8Array): void | Promise<void>;
   receive(): AsyncIterable<Uint8Array>;
@@ -80,7 +86,14 @@ export type CallSessionEvents = {
   connected: (route: LINETypes.CallRoute) => void;
   ended: (reason: string) => void;
   error: (err: Error) => void;
+  video: (state: CallVideoState) => void;
 };
+
+export interface CallVideoState {
+  available: boolean;
+  localEnabled: boolean;
+  remoteEnabled: boolean;
+}
 
 export class CallSession extends TypedEventEmitter<CallSessionEvents> {
   #client: Client;
@@ -94,6 +107,10 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
   #sendAbort?: AbortController;
   #receiveSink?: AudioSink;
   #endTask?: Promise<void>;
+  #localVideoEnabled = false;
+  #remoteVideoEnabled = false;
+  #remoteVideoPaused = false;
+  #remoteVideoNeedsKey = true;
 
   constructor(client: Client, opts: CallSessionOpts) {
     super();
@@ -101,6 +118,12 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
     this.#opts = opts;
     this.#transport = opts.transport ?? stubTransport;
     this.#codecs = opts.codecs ?? defaultCodecFactory;
+    this.#transport.onVideoState = (enabled) => {
+      this.#remoteVideoPaused = !enabled;
+      if (!enabled) this.#remoteVideoNeedsKey = true;
+      this.#remoteVideoEnabled = enabled;
+      this.emit("video", this.videoState);
+    };
   }
 
   get state(): CallSessionState {
@@ -114,6 +137,45 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
   }
   get kind(): CallKind {
     return this.#opts.kind ?? "AUDIO";
+  }
+  get videoState(): CallVideoState {
+    return {
+      available: this.#transport.videoAvailable ?? false,
+      localEnabled: this.#localVideoEnabled,
+      remoteEnabled: this.#remoteVideoEnabled,
+    };
+  }
+
+  async setVideoEnabled(enabled: boolean): Promise<void> {
+    if (this.#state !== "in-call") throw new Error("Video session not in-call");
+    if (!this.#transport.setVideoEnabled)
+      throw new Error("Video is not supported by this transport");
+    await this.#transport.setVideoEnabled(enabled);
+    if (this.#state !== "in-call") return;
+    this.#localVideoEnabled = enabled;
+    this.emit("video", this.videoState);
+  }
+
+  async sendVideo(frame: EncodedVideoFrame): Promise<void> {
+    if (this.#state !== "in-call" || !this.#localVideoEnabled || !this.#transport.sendVideo) {
+      throw new Error("Video is not enabled");
+    }
+    await this.#transport.sendVideo(frame);
+  }
+
+  async *receivedVideo(): AsyncIterable<EncodedVideoFrame> {
+    if (this.#state !== "in-call" || !this.#transport.receiveVideo) return;
+    for await (const frame of this.#transport.receiveVideo()) {
+      if (this.#state !== "in-call") return;
+      if (this.#remoteVideoPaused) continue;
+      if (this.#remoteVideoNeedsKey && !frame.key) continue;
+      this.#remoteVideoNeedsKey = false;
+      if (!this.#remoteVideoEnabled) {
+        this.#remoteVideoEnabled = true;
+        this.emit("video", this.videoState);
+      }
+      yield frame;
+    }
   }
 
   #setState(s: CallSessionState) {
@@ -135,7 +197,7 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
           fromEnvInfo: this.#opts.fromEnvInfo,
         }));
       this.#setState("connecting");
-      await this.#transport.connect({ route: this.#route });
+      await this.#transport.connect({ route: this.#route, kind: this.kind });
       if (this.#opts.direction === "incoming") {
         this.#setState("ringing");
         if (!this.#transport.answer) {
@@ -283,6 +345,8 @@ export class CallSession extends TypedEventEmitter<CallSessionEvents> {
         /* */
       }
       this.#encoder?.close?.();
+      this.#localVideoEnabled = false;
+      this.#remoteVideoEnabled = false;
       this.#decoder?.close?.();
       await this.#receiveSink?.end?.();
       this.#setState("ended");

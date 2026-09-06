@@ -24,7 +24,7 @@ import { Buffer } from "node:buffer";
 
 // ─── varint + wire-type encoding ────────────────────────────────────────
 
-export const enum WireType {
+export enum WireType {
   Varint = 0,
   Fixed64 = 1,
   LengthDelim = 2,
@@ -335,6 +335,7 @@ function packDataOffer(codec: Uint8Array, path: Uint8Array): Uint8Array {
 export function packNativeSetupOffer(
   material: PlanetSetupOfferMaterial,
   selectedCrypto?: "e2ee" | "simple",
+  videoState?: { enabled: boolean },
 ): Uint8Array {
   if (material.mediaPubKey.length !== 33) {
     throw new Error("packNativeSetupOffer: mediaPubKey must be 33 bytes");
@@ -358,7 +359,7 @@ export function packNativeSetupOffer(
   const video = packAudioVideoOffer(
     "V",
     packOfferCodec("V", {
-      enabled: 0,
+      enabled: Number(videoState?.enabled ?? false),
       bitrate: 800,
       fps: 24,
       profile: 2,
@@ -1169,11 +1170,12 @@ export function packStrmSpec(r: StrmSpec): Uint8Array {
   return finalize(b);
 }
 
-export function packMcDataSessionPayload(body: Uint8Array): Uint8Array {
+export function packMcDataSessionPayload(body: Uint8Array, type: 1 | 2 = 2): Uint8Array {
+  if (body.length > 0xffff) throw new Error("MCMMD payload too large");
   const pad = (4 - (body.length % 4)) % 4;
   const header = new Uint8Array([
     0x00,
-    0x02,
+    type,
     0x00,
     0x00,
     (body.length >>> 8) & 0xff,
@@ -1182,6 +1184,66 @@ export function packMcDataSessionPayload(body: Uint8Array): Uint8Array {
     0x00,
   ]);
   return concatSchemaBytes([header, body, new Uint8Array(pad)]);
+}
+
+export interface McStreamControl {
+  operation: 1 | 2 | 3 | 4;
+  mediaKind: number;
+  code: number;
+  ssrcs: number[];
+}
+
+/** MCMMD STRM_CTRL: native jup_media_start, not CC call-type renegotiation. */
+export function packMcStreamControl(control: McStreamControl): Uint8Array {
+  if (
+    control.ssrcs.length > 16 ||
+    ![1, 2, 3, 4].includes(control.operation) ||
+    [control.mediaKind, control.code, ...control.ssrcs].some(
+      (v) => !Number.isInteger(v) || v < 0 || v > 0xffffffff,
+    )
+  ) {
+    throw new Error("Invalid MCMMD stream control");
+  }
+  const body = new Uint8Array(12 + control.ssrcs.length * 4);
+  const view = new DataView(body.buffer);
+  view.setUint16(0, control.operation);
+  view.setUint16(2, control.ssrcs.length);
+  view.setUint32(4, control.mediaKind);
+  view.setUint32(8, control.code);
+  control.ssrcs.forEach((ssrc, i) => view.setUint32(12 + i * 4, ssrc));
+  return packMcDataSessionPayload(body, 1);
+}
+
+export function decodeMcStreamControl(data: Uint8Array): McStreamControl | undefined {
+  if (data.length < 8) throw new Error("Truncated MCMMD header");
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const length = view.getUint16(4);
+  if (data.length !== 8 + Math.ceil(length / 4) * 4) throw new Error("Invalid MCMMD length");
+  if (view.getUint16(0) !== 1) return undefined;
+  if (length < 12) throw new Error("Truncated stream control");
+  const operation = view.getUint16(8);
+  const count = view.getUint16(10);
+  if (![1, 2, 3, 4].includes(operation) || count > 16 || length < 12 + count * 4) {
+    throw new Error("Invalid stream control");
+  }
+  const senderOffset = 20 + count * 4;
+  if (length > 12 + count * 4) {
+    if (senderOffset + 2 > 8 + length) throw new Error("Truncated stream sender");
+    const senderLength = view.getUint16(senderOffset);
+    if (
+      senderLength < 1 ||
+      senderLength > 128 ||
+      senderOffset + 2 + senderLength !== 8 + length ||
+      data[8 + length - 1] !== 0
+    )
+      throw new Error("Invalid stream sender");
+  }
+  return {
+    operation: operation as McStreamControl["operation"],
+    mediaKind: view.getUint32(12),
+    code: view.getUint32(16),
+    ssrcs: Array.from({ length: count }, (_, i) => view.getUint32(20 + i * 4)),
+  };
 }
 
 // ─── mc join/change responses (1:1 BEPI handshake) ─────────────────────
@@ -1928,6 +1990,8 @@ export interface NativeSetupMediaRecord {
   enabled?: number;
   bitrate?: number;
   kind?: number;
+  /** All advertised pmap values, not only the first codec. */
+  kinds?: number[];
   rtpId?: number;
   /** Native local_srcid (SSRC), despite the legacy property name. */
   rtpPort?: number;
@@ -1962,6 +2026,7 @@ export function decodeNativeSetupOffer(bytes: Uint8Array): NativeSetupOffer {
         enabled: asNumberField(codec, 3),
         bitrate: asNumberField(codec, 4),
         kind: asNumberField(codec, 50),
+        kinds: repeatedNumbers(codec, 50),
         rtpId: asNumberField(path, 1),
         rtpPort: asNumberField(path, 11),
         rtcpId: asNumberField(path, 61),

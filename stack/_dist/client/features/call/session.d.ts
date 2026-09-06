@@ -2,6 +2,7 @@ import type { Client } from "../../mod.ts";
 import type * as LINETypes from "@vyline/line-types";
 import type { AudioSink, AudioSource, CodecFactory, PcmFrame } from "./audio.js";
 import { TypedEventEmitter } from "../../../base/core/typed-event-emitter/index.js";
+import type { EncodedVideoFrame } from "./planet/evs3.js";
 export type CallSessionState = "idle" | "acquiring" | "connecting" | "ringing" | "in-call" | "ending" | "ended" | "failed";
 export type CallKind = "AUDIO" | "VIDEO" | "FACEPLAY";
 export interface CallSessionOpts {
@@ -25,7 +26,13 @@ export interface CallTransport {
     readonly audioProfile?: CallAudioProfile | undefined;
     connect(opts: {
         route: LINETypes.CallRoute;
+        kind?: CallKind;
     }): Promise<void>;
+    readonly videoAvailable?: boolean;
+    onVideoState?: (enabled: boolean) => void;
+    setVideoEnabled?(enabled: boolean): Promise<void>;
+    sendVideo?(frame: EncodedVideoFrame): Promise<void>;
+    receiveVideo?(): AsyncIterable<EncodedVideoFrame>;
     close(): Promise<void>;
     send(packet: Uint8Array): void | Promise<void>;
     receive(): AsyncIterable<Uint8Array>;
@@ -49,7 +56,13 @@ export type CallSessionEvents = {
     connected: (route: LINETypes.CallRoute) => void;
     ended: (reason: string) => void;
     error: (err: Error) => void;
+    video: (state: CallVideoState) => void;
 };
+export interface CallVideoState {
+    available: boolean;
+    localEnabled: boolean;
+    remoteEnabled: boolean;
+}
 export declare class CallSession extends TypedEventEmitter<CallSessionEvents> {
     #private;
     constructor(client: Client, opts: CallSessionOpts);
@@ -57,6 +70,10 @@ export declare class CallSession extends TypedEventEmitter<CallSessionEvents> {
     get route(): LINETypes.CallRoute | undefined;
     get peer(): string;
     get kind(): CallKind;
+    get videoState(): CallVideoState;
+    setVideoEnabled(enabled: boolean): Promise<void>;
+    sendVideo(frame: EncodedVideoFrame): Promise<void>;
+    receivedVideo(): AsyncIterable<EncodedVideoFrame>;
     start(): Promise<LINETypes.CallRoute>;
     sendStream(source: AudioSource, opts?: {
         signal?: AbortSignal;

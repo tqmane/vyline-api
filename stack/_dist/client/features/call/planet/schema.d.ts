@@ -19,7 +19,7 @@
  *         cc_rel_req        …
  *         (and so on)
  */
-export declare const enum WireType {
+export declare enum WireType {
     Varint = 0,
     Fixed64 = 1,
     LengthDelim = 2,
@@ -73,7 +73,9 @@ export interface PlanetSetupOfferMaterial {
  * blobs. Dynamic cryptographic material is supplied by the caller so tests can
  * be deterministic.
  */
-export declare function packNativeSetupOffer(material: PlanetSetupOfferMaterial, selectedCrypto?: "e2ee" | "simple"): Uint8Array;
+export declare function packNativeSetupOffer(material: PlanetSetupOfferMaterial, selectedCrypto?: "e2ee" | "simple", videoState?: {
+    enabled: boolean;
+}): Uint8Array;
 export interface PlanetGroupParticipateOfferMaterial {
     /** 30-byte random secret/blob used by the group media key offer. */
     mediaSecret: Uint8Array;
@@ -377,7 +379,16 @@ export interface StrmSpec {
     link?: LinkAttr;
 }
 export declare function packStrmSpec(r: StrmSpec): Uint8Array;
-export declare function packMcDataSessionPayload(body: Uint8Array): Uint8Array;
+export declare function packMcDataSessionPayload(body: Uint8Array, type?: 1 | 2): Uint8Array;
+export interface McStreamControl {
+    operation: 1 | 2 | 3 | 4;
+    mediaKind: number;
+    code: number;
+    ssrcs: number[];
+}
+/** MCMMD STRM_CTRL: native jup_media_start, not CC call-type renegotiation. */
+export declare function packMcStreamControl(control: McStreamControl): Uint8Array;
+export declare function decodeMcStreamControl(data: Uint8Array): McStreamControl | undefined;
 export interface McSessionRsp {
     result?: number;
     relCode?: number;
@@ -603,6 +614,8 @@ export interface NativeSetupMediaRecord {
     enabled?: number;
     bitrate?: number;
     kind?: number;
+    /** All advertised pmap values, not only the first codec. */
+    kinds?: number[];
     rtpId?: number;
     /** Native local_srcid (SSRC), despite the legacy property name. */
     rtpPort?: number;
