@@ -9,6 +9,8 @@ export interface EncodedVideoFrame {
   /** Unsigned 90 kHz RTP timestamp. */
   timestamp: number;
   rotation?: number;
+  /** Conference-verified sender; absent for direct calls and local uploads. */
+  sourceMid?: string;
 }
 
 export function validateVp8(data: Uint8Array, expectedKey?: boolean): void {
