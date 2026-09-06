@@ -1,4 +1,4 @@
-import { assert, assertEquals } from "@vyline/protocol/stack/assert";
+import { assert, assertEquals, assertRejects } from "@vyline/protocol/stack/assert";
 import { Buffer } from "node:buffer";
 import { createSocket, type RemoteInfo, type Socket } from "node:dgram";
 import {
@@ -333,15 +333,20 @@ Deno.test("PlanetTransport retains generated media offer material for SRTP setup
   assertEquals(media.offer.length, 311);
 });
 
-Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow", async () => {
+async function testIncomingAnswer(peerSecurity: "both" | "simple" | "none") {
   const routePeer = generateEphemeralKeypair();
   const peerMedia = generateEphemeralKeypair();
-  const peerOffer = packNativeSetupOffer({
-    mediaPubKey: peerMedia.publicKey,
-    mediaKeyId: 0x12345678,
-    mediaNonce: new Uint8Array(16).fill(0x44),
-    mediaSecret: new Uint8Array(30).fill(0x55),
-  });
+  const peerOffer =
+    peerSecurity === "none"
+      ? new Uint8Array(0)
+      : peerSecurity === "simple"
+        ? packNativeGroupParticipateOffer({ mediaSecret: new Uint8Array(30).fill(0x55) })
+        : packNativeSetupOffer({
+            mediaPubKey: peerMedia.publicKey,
+            mediaKeyId: 0x12345678,
+            mediaNonce: new Uint8Array(16).fill(0x44),
+            mediaSecret: new Uint8Array(30).fill(0x55),
+          });
   const route = makeRoute(routePeer);
   // Android 26.13.0 passes incoming JSON `vs` (voipSessionId) to native as
   // CallSession.InitiatorInfo.communicationId; Planet uses that value as CID.
@@ -467,6 +472,14 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
         assertEquals(endpoint.bootstrap, false);
         const conn = decodeCcConnReq(msg.cc.bodyBytes!);
         assert(conn.answer && conn.answer.length > 0);
+        // Native rejects all session crypto when an answer contains >1 scheme.
+        const security = decodeFields(conn.answer).filter((field) => field.tag === 2);
+        assertEquals(security.length, 1);
+        assertEquals(
+          decodeFields(security[0].value as Uint8Array)[0].tag,
+          peerSecurity === "both" ? 3 : 2,
+        );
+        if (peerSecurity === "both") assertEquals(conn.answer.length, 275);
         assertEquals(conn.mChanId !== undefined, true);
         assertEquals(conn.devId, advertisedDeviceId);
         return buildServerWire(serverSendKeys, connRspPlain, 0x5102);
@@ -475,6 +488,12 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
   });
 
   await transport.connect({ route });
+  if (peerSecurity === "none") {
+    await assertRejects(() => transport.answer(), Error, "no supported encrypted media scheme");
+    await transport.close();
+    assertEquals(sentCcTags.includes(CC_MSG.CONN_REQ), false);
+    return;
+  }
   const result = await transport.answer();
   assert(result.mediaReady);
   assertEquals(result.connRsp.result, 0);
@@ -485,7 +504,14 @@ Deno.test("PlanetTransport.answer follows native VERIFY -> CONN responder flow",
   await transport.send(new Uint8Array([0xf8, 0xff, 0xfd]));
   assertEquals(sentAudioSsrc, 101);
   await transport.close();
-});
+}
+
+Deno.test("PlanetTransport.answer prefers one E2EE scheme and its advertised RX stream", () =>
+  testIncomingAnswer("both"));
+Deno.test("PlanetTransport.answer selects one SRTP scheme for a simple-only peer", () =>
+  testIncomingAnswer("simple"));
+Deno.test("PlanetTransport.answer refuses a peer offering no encrypted media", () =>
+  testIncomingAnswer("none"));
 
 async function testPeerAudio(peerSecurity: "ecdh" | "simple" | "simple-only") {
   const routePeer = generateEphemeralKeypair();

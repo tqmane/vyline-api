@@ -73,7 +73,7 @@ export interface PlanetSetupOfferMaterial {
  * blobs. Dynamic cryptographic material is supplied by the caller so tests can
  * be deterministic.
  */
-export declare function packNativeSetupOffer(material: PlanetSetupOfferMaterial): Uint8Array;
+export declare function packNativeSetupOffer(material: PlanetSetupOfferMaterial, selectedCrypto?: "e2ee" | "simple"): Uint8Array;
 export interface PlanetGroupParticipateOfferMaterial {
     /** 30-byte random secret/blob used by the group media key offer. */
     mediaSecret: Uint8Array;

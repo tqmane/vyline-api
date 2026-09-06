@@ -1697,7 +1697,30 @@ export class PlanetTransport implements CallTransport {
     }
     this.#remoteCcChanId = verifyReply.message.cc?.hdr?.srcChanId ?? this.#remoteCcChanId;
     const peerOffer = tryDecodeNativeSetupOffer(verifyRsp.offer);
-    const mediaReady = await this.#configureMedia(peerOffer, {
+    const selectedCrypto =
+      peerOffer?.mediaPubKey?.length === 33 &&
+      peerOffer.mediaNonce?.length === 16 &&
+      peerOffer.mediaKeyId !== undefined
+        ? "e2ee"
+        : peerOffer?.mediaSecret?.length === 30
+          ? "simple"
+          : undefined;
+    if (!selectedCrypto || !this.#localMediaOffer) {
+      throw new Error("PLANET peer offers no supported encrypted media scheme");
+    }
+    this.#localMediaOffer.offer = packNativeSetupOffer(
+      this.#localMediaOffer.material,
+      selectedCrypto,
+    );
+    // Candidate authentication must stay inside the selected crypto family.
+    const negotiatedPeer = { ...peerOffer! };
+    if (selectedCrypto === "e2ee") delete negotiatedPeer.mediaSecret;
+    else {
+      delete negotiatedPeer.mediaPubKey;
+      delete negotiatedPeer.mediaKeyId;
+      delete negotiatedPeer.mediaNonce;
+    }
+    const mediaReady = await this.#configureMedia(negotiatedPeer, {
       answer: verifyRsp.offer,
       netType: 1,
       unavailToSec: 120,
