@@ -18,8 +18,13 @@ import { Buffer } from "node:buffer";
 import type { Socket as DgramSocket } from "node:dgram";
 import type * as LINETypes from "@vyline/line-types";
 import type { CallAudioProfile, CallKind, CallTransport } from "../session.ts";
+import { AudioActivityDetector } from "../audio.js";
 import { makeChunkHdr, parseFrameHeader } from "./framing.js";
-import { depacketizeEas2, packetizeEas2 } from "./eas2.js";
+import { depacketizeEas2, packetizeEas2, packetizeEas2Frames } from "./eas2.js";
+import { buildGroupVsd, readPlanetRtpExtension, unpackXrtp } from "./xrtp.js";
+import { buildPdtp, parsePdtp, PdtpReceiver, type PdtpPacket } from "./pdtp.js";
+import { ConferenceState, type ConferenceMember } from "./conference.js";
+import type { CallAudioPacket } from "../groupAudio.js";
 import { Evs3Assembler, packetizeEvs3, type EncodedVideoFrame } from "./evs3.js";
 import {
   aesCtrDecrypt,
@@ -344,32 +349,6 @@ const PINHOLE_KIND = 16;
 const PINHOLE_MTU = 300;
 const PINHOLE_REPORT_MTU = 500;
 const PINHOLE_PAYLOAD_BYTES = 500;
-const GROUP_AUDIO_RTP_EXTENSION = new Uint8Array([0x01, 0x02, 0xc0, 0x40, 0x40, 0x00, 0x00, 0x00]);
-const GROUP_AUDIO_RTP_EXTENSIONS = [
-  new Uint8Array([0x01, 0x02, 0xc0, 0x40, 0x7f, 0x00, 0x00, 0x00]),
-  new Uint8Array([0x01, 0x02, 0xc0, 0x40, 0x53, 0x00, 0x00, 0x00]),
-  new Uint8Array([0x01, 0x02, 0xc0, 0x54, 0x39, 0x00, 0x00, 0x00]),
-  new Uint8Array([0x01, 0x02, 0xc0, 0x54, 0x47, 0x00, 0x00, 0x00]),
-  new Uint8Array([0x01, 0x02, 0xc0, 0x50, 0x49, 0x00, 0x00, 0x00]),
-  new Uint8Array([0x01, 0x02, 0xc0, 0x40, 0x50, 0x00, 0x00, 0x00]),
-  new Uint8Array([0x01, 0x02, 0xc0, 0x40, 0x4f, 0x00, 0x00, 0x00]),
-  new Uint8Array([0x01, 0x02, 0xc0, 0x40, 0x50, 0x00, 0x00, 0x00]),
-  new Uint8Array([0x01, 0x02, 0xc0, 0x40, 0x52, 0x00, 0x00, 0x00]),
-];
-const GROUP_DATA_RTP_PAYLOADS = [
-  new Uint8Array([0x80, 0x00, 0x00, 0x40, 0x00, 0x05, 0x02, 0x05, 0x00, 0x00, 0x00]),
-  new Uint8Array([0x80, 0x00, 0x00, 0x40, 0x00, 0x05, 0x02, 0x05, 0x00, 0x00, 0x00]),
-  new Uint8Array([0x80, 0x00, 0x00, 0x40, 0x00, 0x04, 0x02, 0x03, 0x1b, 0x00]),
-  new Uint8Array([0x80, 0x00, 0x00, 0x40, 0x00, 0x04, 0x02, 0x03, 0x1b, 0x00]),
-  new Uint8Array([0x80, 0x00, 0x00, 0x40, 0x00, 0x04, 0x02, 0x03, 0x39, 0x00]),
-  new Uint8Array([0x80, 0x00, 0x00, 0x40, 0x00, 0x04, 0x02, 0x03, 0x39, 0x00]),
-  new Uint8Array([0x80, 0x00, 0x00, 0x40, 0x00, 0x05, 0x02, 0x03, 0x40, 0x57, 0x00]),
-  new Uint8Array([0x80, 0x00, 0x00, 0x40, 0x00, 0x05, 0x02, 0x03, 0x40, 0x57, 0x00]),
-  new Uint8Array([0x80, 0x00, 0x00, 0x40, 0x00, 0x05, 0x02, 0x03, 0x40, 0x75, 0x00]),
-  new Uint8Array([0x80, 0x00, 0x00, 0x03, 0x00, 0x02, 0x40, 0xc8, 0x01, 0x01]),
-];
-const GROUP_DATA_RTP_TIMESTAMP_STEPS = [0, 8, 20, 10, 20, 10, 20, 10, 20, 10];
-const GROUP_RTCP_SENDER_SSRC = 0x1a92;
 const PINHOLE_ID_HIGH_BIT = 1n << 47n;
 const PINHOLE_ID_MASK = (1n << 48n) - 1n;
 let lastPinholeProbeId = 0n;
@@ -616,49 +595,6 @@ function randomInitialFrameSeq(): number {
   return randomIntInclusive(1, 1023);
 }
 
-function addU32(value: number, delta: number): number {
-  return (value + delta) >>> 0;
-}
-
-function putU16(out: Uint8Array, off: number, value: number): void {
-  out[off] = (value >>> 8) & 0xff;
-  out[off + 1] = value & 0xff;
-}
-
-function putU32(out: Uint8Array, off: number, value: number): void {
-  out[off] = (value >>> 24) & 0xff;
-  out[off + 1] = (value >>> 16) & 0xff;
-  out[off + 2] = (value >>> 8) & 0xff;
-  out[off + 3] = value & 0xff;
-}
-
-function randomSsrcBase(): number {
-  let base = randomU32() & 0xffff_ff00;
-  if (base === 0) base = 0x100;
-  return base >>> 0;
-}
-
-function buildGroupRtcpFeedback(opts: {
-  senderSsrc: number;
-  rxAudioSsrc: number;
-  rxDataSsrc: number;
-}): Uint8Array {
-  const out = new Uint8Array(48);
-  out[0] = 0x8b; // RTCP RTPFB, FMT=11
-  out[1] = 0xcd; // PT=205, logged as RTP-like payload type 77
-  putU16(out, 2, 11);
-  putU32(out, 4, opts.senderSsrc);
-  putU32(out, 8, opts.senderSsrc);
-  out.set([0x00, 0x00, 0x01, 0x66, 0x00, 0x01, 0x00, 0xc8], 12);
-  putU32(out, 20, opts.rxDataSsrc);
-  out.set([0x00, 0x01, 0x00, 0x02, 0x02, 0x73, 0x00, 0x00], 24);
-  putU32(out, 32, opts.rxAudioSsrc);
-  putU32(out, 36, 0);
-  putU32(out, 40, opts.rxAudioSsrc);
-  putU32(out, 44, 0);
-  return out;
-}
-
 function copyBytes(bytes: Uint8Array): Uint8Array {
   return new Uint8Array(bytes);
 }
@@ -828,6 +764,7 @@ export class PlanetTransport implements CallTransport {
   #srtpRecv?: SrtpCryptoContext;
   #groupDataSrtpSend?: SrtpCryptoContext;
   #dataSrtpRecv?: SrtpCryptoContext;
+  #dataPayloadType?: number;
   #mediaKeyMode?: PlanetMediaKeyMode;
   #mediaKeyCandidates: MediaKeyCandidate[] = [];
   #rtp?: {
@@ -840,10 +777,11 @@ export class PlanetTransport implements CallTransport {
   };
   #groupDataRtp?: {
     ssrc: number;
-    seq: number;
-    timestamp: number;
-    index: number;
+    number: bigint;
   };
+  #pdtp = new PdtpReceiver();
+  #conference = new ConferenceState();
+  onConference?: (members: ConferenceMember[]) => void;
   #rtpQueue: RtpDatagram[] = [];
   #rtpWaiters: Array<(packet: RtpDatagram | null) => void> = [];
   #initialVideo = false;
@@ -873,12 +811,12 @@ export class PlanetTransport implements CallTransport {
   #groupJoined = false;
   #groupDataSessionSent = false;
   #groupAudioSsrc?: number;
-  #groupAudioExtensionIndex = 0;
+  #pendingGroupAudio: Array<{ opus: Uint8Array; audio?: { level: number; signal: 0 | 1 | 2 } }> =
+    [];
+  #groupActivity = new AudioActivityDetector();
   #groupRxAudioSsrc?: number;
   #groupDataSsrc?: number;
   #groupRxDataSsrc?: number;
-  #groupRtcpSsrc?: number;
-  #groupRtcpSent = false;
   #remoteCcChanId = 0n;
   #remoteMediaChanId = 0n;
   #targetMid?: string;
@@ -919,7 +857,6 @@ export class PlanetTransport implements CallTransport {
   }
 
   get audioProfile(): CallAudioProfile | undefined {
-    if (this.#groupJoined) return undefined;
     return {
       frameDurationMs: 20,
       vbr: false,
@@ -985,12 +922,11 @@ export class PlanetTransport implements CallTransport {
     this.#groupJoined = false;
     this.#groupDataSessionSent = false;
     this.#groupAudioSsrc = undefined;
-    this.#groupAudioExtensionIndex = 0;
+    this.#pendingGroupAudio = [];
+    this.#groupActivity = new AudioActivityDetector();
     this.#groupRxAudioSsrc = undefined;
     this.#groupDataSsrc = undefined;
     this.#groupRxDataSsrc = undefined;
-    this.#groupRtcpSsrc = undefined;
-    this.#groupRtcpSent = false;
     this.#remoteCcChanId = 0n;
     this.#remoteMediaChanId = 0n;
     this.#targetMid = undefined;
@@ -1005,10 +941,13 @@ export class PlanetTransport implements CallTransport {
     this.#srtpRecv = undefined;
     this.#groupDataSrtpSend = undefined;
     this.#dataSrtpRecv = undefined;
+    this.#dataPayloadType = undefined;
     this.#mediaKeyMode = undefined;
     this.#mediaKeyCandidates = [];
     this.#rtp = undefined;
     this.#groupDataRtp = undefined;
+    this.#pdtp = new PdtpReceiver();
+    this.#conference = new ConferenceState();
     this.#rtpQueue = [];
     this.#initialVideo = opts.kind === "VIDEO";
     this.#clearVideo();
@@ -1080,7 +1019,11 @@ export class PlanetTransport implements CallTransport {
               ? ((wire[8] << 24) | (wire[9] << 16) | (wire[10] << 8) | wire[11]) >>> 0
               : undefined,
         });
-        if (this.#rtp && payloadType !== this.#rtp.payloadType) {
+        if (
+          this.#rtp &&
+          payloadType !== this.#rtp.payloadType &&
+          !(this.#groupJoined && payloadType === this.#dataPayloadType)
+        ) {
           this.#debug({
             type: "media_ignored",
             reason: "unexpected_payload_type",
@@ -1261,13 +1204,10 @@ export class PlanetTransport implements CallTransport {
           } catch {
             // Keep processing even if a newer REL shape appears.
           }
-          // Remote hangup (1:1): tear down locally so receive() terminates and
-          // the session layer can end the call. Group REL semantics differ
-          // (roomDestroy / participant release), so leave those untouched.
-          if (!this.#groupJoined) {
-            this.#handleRemoteRelease({ relCode, relPhrase, releaser });
-            return;
-          }
+          // Native 0x512fab/0x518bb0: a REL routed to this session ends our
+          // participation too. Other members leaving are conference updates.
+          this.#handleRemoteRelease({ relCode, relPhrase, releaser });
+          return;
         }
         if (msg.cc?.bodyTag === CC_MSG.CONN_REQ && msg.cc.bodyBytes) {
           let connSummary: Record<string, unknown> = {};
@@ -1315,25 +1255,19 @@ export class PlanetTransport implements CallTransport {
   }
 
   #enqueueRtp(packet: Uint8Array, source?: { host: string; port: number }) {
+    if (packet.length > 16 * 1600 + 1024) return;
     const waiter = this.#rtpWaiters.shift();
     const datagram = { packet, source };
     if (waiter) waiter(datagram);
-    else this.#rtpQueue.push(datagram);
+    else {
+      if (this.#rtpQueue.length >= 64) this.#rtpQueue.shift();
+      this.#rtpQueue.push(datagram);
+    }
   }
 
   #updateRtpEndpointFromSource(source: { host: string; port: number } | undefined) {
     if (!source || !this.#rtp) return;
     if (this.#rtp.host === source.host && this.#rtp.port === source.port) {
-      return;
-    }
-    if (this.#groupJoined) {
-      this.#debug({
-        type: "media_endpoint_learn_skipped",
-        reason: "group_fixed_route",
-        family: source.host.includes(":") ? "ipv6" : "ipv4",
-        sourcePort: source.port,
-        currentPort: this.#rtp.port,
-      });
       return;
     }
     this.#rtp.host = source.host;
@@ -1346,6 +1280,7 @@ export class PlanetTransport implements CallTransport {
   }
 
   #takeRtp(): Promise<RtpDatagram | null> {
+    if (this.#closed) return Promise.resolve(null);
     const queued = this.#rtpQueue.shift();
     if (queued) return Promise.resolve(queued);
     return new Promise((resolve) => this.#rtpWaiters.push(resolve));
@@ -1810,6 +1745,7 @@ export class PlanetTransport implements CallTransport {
 
   async #sendParticipate(opts: { roomId: string }): Promise<void> {
     if (!this.#route || !this.#local) throw new Error("connect first");
+    if (!this.#route.groupToken) throw new Error("Group route required");
     const route = this.#route;
     const cid = this.#callUuid!;
     const localMediaOffer = defaultLocalMediaOffer();
@@ -1819,6 +1755,7 @@ export class PlanetTransport implements CallTransport {
       packNativeGroupParticipateOffer({
         mediaSecret: localMediaOffer.material.mediaSecret,
       });
+    localMediaOffer.offer = offer;
     const participate: CcParticipateReq = {
       participant: this.#opts.localMid,
       roomId: opts.roomId,
@@ -1865,20 +1802,28 @@ export class PlanetTransport implements CallTransport {
       { bootstrap: true, msgId: CASSINI_MSG_ID_GROUP_PARTICIPATE_REQ },
     );
     this.#setupSent = true;
-    this.#groupJoined = true;
   }
 
-  async #sendGroupDataSessionOpen(dstChanId: bigint): Promise<void> {
+  async #sendGroupDataSessionOpen(
+    dstChanId: bigint,
+    peerOffer: NativeSetupOffer | undefined,
+  ): Promise<void> {
     if (!this.#route) throw new Error("connect first");
     if (this.#groupDataSessionSent) return;
     const cid = this.#callUuid!;
-    const base = randomSsrcBase();
-    const rxAudioSsrc = addU32(base, 0x79);
-    const txAudioSsrc = addU32(base, 0x7d);
-    const rxVideoSsrc = addU32(base, 0xd9);
-    const txVideoSsrc = addU32(base, 0xdd);
-    const rxDataSsrc = addU32(base, 0xa9);
-    const txDataSsrc = addU32(base, 0xad);
+    const sourceIds = (name: string): [number, number] => {
+      const media = peerOffer?.media.find((m) => m.name === name);
+      const ids = [media?.rtpPort, media?.rtcpId];
+      if (ids.some((id) => !Number.isInteger(id) || id! < 0 || id! > 0xffffffff)) {
+        throw new Error("Group media source IDs missing");
+      }
+      return [ids[0]!, ids[1]!];
+    };
+    // Native 0x515ab0 enumerates negotiated streams; it does not allocate a
+    // second set of unrelated SSRCs when constructing the stream specification.
+    const [rxAudioSsrc, txAudioSsrc] = sourceIds("A");
+    const [rxVideoSsrc, txVideoSsrc] = sourceIds("V");
+    const [rxDataSsrc, txDataSsrc] = sourceIds("D");
     this.#groupAudioSsrc = txAudioSsrc;
     this.#groupRxAudioSsrc = rxAudioSsrc;
     this.#groupDataSsrc = txDataSsrc;
@@ -1982,10 +1927,14 @@ export class PlanetTransport implements CallTransport {
         this.#opts.groupDataSessionAfterProvisional &&
         !this.#groupDataSessionSent &&
         remoteChanId !== undefined &&
+        participateRsp.answer &&
         participateRsp.relCode === undefined &&
         (participateRsp.result === undefined || participateRsp.result === 0)
       ) {
-        await this.#sendGroupDataSessionOpen(remoteChanId);
+        await this.#sendGroupDataSessionOpen(
+          remoteChanId,
+          tryDecodeNativeSetupOffer(participateRsp.answer),
+        );
       }
       if (
         participateRsp.result !== undefined ||
@@ -1998,12 +1947,26 @@ export class PlanetTransport implements CallTransport {
       if (Date.now() >= deadline) throw new Error("PLANET reply timeout");
     }
     this.#remoteCcChanId = reply.message.cc?.hdr?.srcChanId ?? 0n;
+    if ((participateRsp.result ?? 0) !== 0 || (participateRsp.relCode ?? 0) !== 0) {
+      throw new Error(
+        `PLANET group participation rejected (${participateRsp.result ?? 0}/${participateRsp.relCode ?? 0})`,
+      );
+    }
+    this.#groupJoined = true;
+    if (
+      participateRsp.contentsType === 1 &&
+      participateRsp.contents?.length &&
+      this.#conference.acceptInfo(participateRsp.contents, participateRsp.compContentsType ?? 0)
+    ) {
+      this.#emitConference();
+    }
     this.#remoteMediaChanId = participateRsp.mChanId ?? 0n;
     const mcDstChanId = this.#remoteMediaChanId || this.#remoteCcChanId;
-    if (!this.#groupDataSessionSent && mcDstChanId !== 0n) {
-      await this.#sendGroupDataSessionOpen(mcDstChanId);
-    }
+    if (mcDstChanId === 0n) throw new Error("Group media channel missing");
     const peerAnswerOffer = tryDecodeNativeSetupOffer(participateRsp.answer);
+    if (!this.#groupDataSessionSent && mcDstChanId !== 0n) {
+      await this.#sendGroupDataSessionOpen(mcDstChanId, peerAnswerOffer);
+    }
     const bridgeAddr = bridgeInfoAddr(participateRsp.bridgeInfo);
     if (bridgeAddr) {
       this.#debug({
@@ -2020,7 +1983,9 @@ export class PlanetTransport implements CallTransport {
       unavailToSec: 120,
       oCapas: [],
       features: [],
+      mAddr: bridgeAddr,
     });
+    if (!mediaReady) throw new Error("PLANET group media negotiation failed");
     await this.#sendPinholeProbes();
     await this.#sendKeepalive();
     this.#startKeepalive(participateRsp.aliveRptInterval);
@@ -2082,7 +2047,18 @@ export class PlanetTransport implements CallTransport {
     const local = this.#localMediaOffer;
     const route = this.#route;
     if (!local || !route) return false;
-    this.#debug({type:"media_streams", streams:peerOffer.media.map(({name,enabled,kind,kinds,rtpId,rtpPort,rtcpId})=>({name,enabled,kind,kinds,rtpId,rtpPort,rtcpId}))});
+    this.#debug({
+      type: "media_streams",
+      streams: peerOffer.media.map(({ name, enabled, kind, kinds, rtpId, rtpPort, rtcpId }) => ({
+        name,
+        enabled,
+        kind,
+        kinds,
+        rtpId,
+        rtpPort,
+        rtcpId,
+      })),
+    });
     this.#mediaKeyCandidates = [];
     const addCandidate = async (
       mode: MediaKeyCandidate["mode"],
@@ -2190,11 +2166,7 @@ export class PlanetTransport implements CallTransport {
         derivePlanetMediaStreamKeying(local.material.mediaSecret, "DATA"),
       );
     }
-    if (
-      !this.#groupJoined &&
-      local.material.mediaSecret.length === 30 &&
-      peerOffer.mediaSecret?.length === 30
-    ) {
+    if (local.material.mediaSecret.length === 30 && peerOffer.mediaSecret?.length === 30) {
       this.#dataSrtpRecv = await deriveSrtpContext(
         derivePlanetMediaStreamKeying(peerOffer.mediaSecret, "DATA"),
       );
@@ -2211,14 +2183,12 @@ export class PlanetTransport implements CallTransport {
     const audio =
       peerOffer.media.find((m) => m.name === "A" && m.enabled !== 0 && m.rtpId !== undefined) ??
       peerOffer.media.find((m) => m.kind === 1 && m.enabled !== 0 && m.rtpId !== undefined);
+    this.#dataPayloadType = peerOffer.media.find((m) => m.name === "D" && m.enabled !== 0)?.rtpId;
     // The answerer's local_srcid is the caller's RX stream. Using the peer's
     // remote_srcid here hits its TX stream and native drops it before decoding.
     const answeredAudio = this.#incomingCall
       ? decodeNativeSetupOffer(local.offer).media.find((m) => m.name === "A")
       : undefined;
-    if (this.#groupJoined) {
-      this.#groupRtcpSsrc = GROUP_RTCP_SENDER_SSRC;
-    }
     this.#rtp = {
       host: endpoint.host,
       port: endpoint.port,
@@ -2255,10 +2225,8 @@ export class PlanetTransport implements CallTransport {
     if (this.#initialVideo && !this.#videoRtp) throw new Error("Peer does not support VP8 video");
     if (this.#groupDataSrtpSend) {
       this.#groupDataRtp = {
-        ssrc: this.#groupDataSsrc ?? addU32(this.#rtp.ssrc, 0x30),
-        seq: 2,
-        timestamp: randomIntInclusive(0x7000, 0x8000),
-        index: 0,
+        ssrc: this.#groupDataSsrc!,
+        number: 1n,
       };
     }
     this.#debug({
@@ -2268,7 +2236,6 @@ export class PlanetTransport implements CallTransport {
       port: endpoint.port,
       payloadType: this.#rtp.payloadType,
       ssrc: this.#rtp.ssrc,
-      rtcpSsrc: this.#groupRtcpSsrc,
       rtcpId: audio?.rtcpId,
       rtpPort: audio?.rtpPort,
       groupDataSsrc: this.#groupDataRtp?.ssrc,
@@ -2629,6 +2596,10 @@ export class PlanetTransport implements CallTransport {
   #handleRemoteRelease(info: { relCode?: number; relPhrase?: string; releaser?: string }): void {
     if (this.#remoteEnded) return;
     this.#remoteEnded = true;
+    this.#setupSent = false;
+    this.#rtpQueue = [];
+    this.#pdtp = new PdtpReceiver();
+    this.#conference = new ConferenceState();
     const who = [info.releaser, info.relPhrase].filter(Boolean).join(":");
     const code = typeof info.relCode === "number" ? ` (relCode=${info.relCode})` : "";
     this.#remoteEndReason = `remote ended the call${code}${who ? `: ${who}` : ""}`;
@@ -2659,9 +2630,12 @@ export class PlanetTransport implements CallTransport {
     this.#closed = true;
     this.#clearVideo();
     this.#clearKeepalive();
+    this.#pdtp = new PdtpReceiver();
+    this.#conference = new ConferenceState();
     try {
       if (this.#setupSent && this.#route && (this.#sock || this.#opts.wireSend)) {
-        const relBody = this.#groupJoined
+        this.#setupSent = false;
+        const relBody = this.#route.groupToken
           ? packCcRelReq({
               relCode: 1,
               releaser: "participant",
@@ -2696,18 +2670,44 @@ export class PlanetTransport implements CallTransport {
     for (const waiter of this.#pending.splice(0)) waiter(new Error("transport closed"));
   }
 
-  async send(opusPacket: Uint8Array, opts: { timestampStep?: number } = {}): Promise<void> {
+  async send(
+    opusPacket: Uint8Array,
+    opts: { timestampStep?: number; audioLevel?: number } = {},
+  ): Promise<void> {
     if (!this.#srtpSend || !this.#rtp) {
       throw new Error("PlanetTransport.send: media not established");
     }
-    const timestampStep = opts.timestampStep ?? this.#opts.rtpTimestampStep ?? 960;
-    const extensionData = this.#nextAudioRtpExtension();
-    const timestamp = this.#nextAudioRtpTimestamp(timestampStep);
+    let payload: Uint8Array;
+    let extensionData: Uint8Array | undefined;
+    let timestampStep = opts.timestampStep ?? this.#opts.rtpTimestampStep ?? 960;
+    if (this.#groupJoined) {
+      // Encode 20ms frames; the declared group stream ptime is 40ms.
+      packetizeEas2(opusPacket); // Validate before buffering.
+      if (
+        opts.audioLevel !== undefined &&
+        (!Number.isInteger(opts.audioLevel) || opts.audioLevel < 0 || opts.audioLevel > 127)
+      )
+        throw new Error("Invalid group audio level");
+      this.#pendingGroupAudio.push({
+        opus: opusPacket.slice(),
+        audio:
+          opts.audioLevel === undefined
+            ? undefined
+            : { level: opts.audioLevel, signal: this.#groupActivity.signal(opts.audioLevel) },
+      });
+      if (this.#pendingGroupAudio.length < 2) return;
+      payload = packetizeEas2Frames(this.#pendingGroupAudio.map((f) => f.opus));
+      const frames = this.#pendingGroupAudio.map((f) => f.audio);
+      if (frames.every((n) => n !== undefined))
+        extensionData = buildGroupVsd([frames[0]!, frames[1]!]);
+      this.#pendingGroupAudio = [];
+      timestampStep = 1920;
+    } else payload = packetizeEas2(opusPacket);
+    const timestamp = (this.#rtp.timestamp += timestampStep) >>> 0;
     const seq = this.#rtp.seq++ & 0xffff;
-    const payload = this.#groupJoined ? opusPacket : packetizeEas2(opusPacket);
     const rtp = buildRtp({
       payloadType: this.#rtp.payloadType,
-      marker: this.#groupJoined ? this.#groupAudioExtensionIndex === 3 : !this.#audioSent,
+      marker: !this.#audioSent,
       seq,
       timestamp,
       ssrc: this.#rtp.ssrc,
@@ -2728,7 +2728,6 @@ export class PlanetTransport implements CallTransport {
       seq,
       rtpFirstByte: rtp[0],
       rtpExtensionBytes: extensionData?.length ?? 0,
-      rtpExtensionIndex: this.#groupAudioExtensionIndex,
       timestamp,
       timestampStep,
       family: this.#rtp.host.includes(":") ? "ipv6" : "ipv4",
@@ -2744,8 +2743,6 @@ export class PlanetTransport implements CallTransport {
         bodyLen: wire.length,
         plaintext: payload,
       });
-      await this.#sendGroupDataRtpControl();
-      await this.#sendGroupRtcpFeedback();
       return;
     }
     if (!this.#sock) throw new Error("PlanetTransport.send: socket closed");
@@ -2754,8 +2751,54 @@ export class PlanetTransport implements CallTransport {
         e ? rj(e) : res(),
       ),
     );
-    await this.#sendGroupDataRtpControl();
-    await this.#sendGroupRtcpFeedback();
+  }
+
+  async #sendGroupPdtp(reply: Omit<PdtpPacket, "number">, channel: number): Promise<void> {
+    if (this.#closed || !this.#groupDataRtp || !this.#groupDataSrtpSend || !this.#rtp) return;
+    const number = this.#groupDataRtp.number++;
+    const payload = buildPdtp({ ...reply, number });
+    const extensionData = channel ? new Uint8Array(4) : undefined;
+    if (extensionData) new DataView(extensionData.buffer).setUint32(0, channel);
+    const rtp = buildRtp({
+      payloadType: this.#dataPayloadType!,
+      ssrc: this.#groupDataRtp.ssrc,
+      seq: Number(number & 65535n),
+      timestamp: Math.floor(performance.now()) >>> 0,
+      payload,
+      extensionProfile: channel ? 0x0261 : 0x0240,
+      extensionData,
+    });
+    const wire = await srtpEncrypt(this.#groupDataSrtpSend, rtp);
+    if (this.#closed) return;
+    if (this.#opts.wireSend)
+      await this.#opts.wireSend(wire, {
+        host: this.#rtp.host,
+        port: this.#rtp.port,
+        bootstrap: false,
+        seq: Number(number & 65535n),
+        plainLen: payload.length,
+        bodyLen: wire.length,
+        plaintext: payload,
+      });
+    else {
+      const sock = this.#sock;
+      if (!sock) return;
+      await new Promise<void>((resolve, reject) =>
+        sock.send(wire, this.#rtp!.port, this.#rtp!.host, (error) =>
+          error ? reject(error) : resolve(),
+        ),
+      );
+    }
+  }
+
+  #emitConference(): void {
+    const members = this.#conference.members;
+    this.#debug({
+      type: "group_conference",
+      members: members.length,
+      sources: members.reduce((n, m) => n + m.sources.length, 0),
+    });
+    this.onConference?.(members);
   }
 
   #clearVideo(): void {
@@ -2921,123 +2964,11 @@ export class PlanetTransport implements CallTransport {
     }
   }
 
-  #nextAudioRtpTimestamp(timestampStep: number): number {
-    if (this.#groupJoined && this.#rtp?.timestamp === 0 && timestampStep === 1920) {
-      this.#rtp.timestamp = 960;
-      return 960;
-    }
-    return (this.#rtp!.timestamp += timestampStep) >>> 0;
-  }
-
-  #nextAudioRtpExtension(): Uint8Array | undefined {
-    if (!this.#groupJoined) return undefined;
-    const extension =
-      GROUP_AUDIO_RTP_EXTENSIONS[
-        Math.min(this.#groupAudioExtensionIndex, GROUP_AUDIO_RTP_EXTENSIONS.length - 1)
-      ] ?? GROUP_AUDIO_RTP_EXTENSION;
-    this.#groupAudioExtensionIndex++;
-    return extension;
-  }
-
-  async #sendGroupDataRtpControl(): Promise<void> {
-    if (!this.#groupDataSrtpSend || !this.#groupDataRtp || !this.#rtp) {
-      return;
-    }
-    if (this.#groupAudioExtensionIndex < 6) return;
-    if (this.#groupDataRtp.index >= GROUP_DATA_RTP_PAYLOADS.length) return;
-    const payload = GROUP_DATA_RTP_PAYLOADS[this.#groupDataRtp.index];
-    const timestampStep = GROUP_DATA_RTP_TIMESTAMP_STEPS[this.#groupDataRtp.index] ?? 10;
-    this.#groupDataRtp.index++;
-    const rtp = buildRtp({
-      payloadType: 101,
-      marker: true,
-      seq: this.#groupDataRtp.seq++ & 0xffff,
-      timestamp: (this.#groupDataRtp.timestamp += timestampStep) >>> 0,
-      ssrc: this.#groupDataRtp.ssrc,
-      payload,
-      extensionProfile: 0x0240,
-    });
-    const wire = await srtpEncrypt(this.#groupDataSrtpSend, rtp);
-    this.#debug({
-      type: "group_data_rtp_send",
-      bytes: wire.length,
-      payloadBytes: payload.length,
-      payloadType: 101,
-      ssrc: this.#groupDataRtp.ssrc,
-      seq: (this.#groupDataRtp.seq - 1) & 0xffff,
-      rtpFirstByte: rtp[0],
-      rtpExtensionBytes: 0,
-      timestampStep,
-      port: this.#rtp.port,
-    });
-    if (this.#opts.wireSend) {
-      await this.#opts.wireSend(wire, {
-        host: this.#rtp.host,
-        port: this.#rtp.port,
-        bootstrap: false,
-        seq: this.#groupDataRtp.seq,
-        plainLen: payload.length,
-        bodyLen: wire.length,
-        plaintext: payload,
-      });
-      return;
-    }
-    if (!this.#sock) throw new Error("PlanetTransport.send: socket closed");
-    await new Promise<void>((res, rj) =>
-      this.#sock!.send(Buffer.from(wire), this.#rtp!.port, this.#rtp!.host, (e) =>
-        e ? rj(e) : res(),
-      ),
-    );
-  }
-
-  async #sendGroupRtcpFeedback(): Promise<void> {
-    if (
-      this.#groupRtcpSent ||
-      !this.#groupJoined ||
-      !this.#rtp ||
-      !this.#groupRtcpSsrc ||
-      !this.#groupRxAudioSsrc ||
-      !this.#groupRxDataSsrc
-    ) {
-      return;
-    }
-    if (this.#groupAudioExtensionIndex < 8) return;
-    this.#groupRtcpSent = true;
-    const wire = buildGroupRtcpFeedback({
-      senderSsrc: this.#groupRtcpSsrc,
-      rxAudioSsrc: this.#groupRxAudioSsrc,
-      rxDataSsrc: this.#groupRxDataSsrc,
-    });
-    this.#debug({
-      type: "group_rtcp_feedback_send",
-      bytes: wire.length,
-      payloadType: wire[1] & 0x7f,
-      senderSsrc: this.#groupRtcpSsrc,
-      rxAudioSsrc: this.#groupRxAudioSsrc,
-      rxDataSsrc: this.#groupRxDataSsrc,
-      port: this.#rtp.port,
-    });
-    if (this.#opts.wireSend) {
-      await this.#opts.wireSend(wire, {
-        host: this.#rtp.host,
-        port: this.#rtp.port,
-        bootstrap: false,
-        seq: 0,
-        plainLen: wire.length,
-        bodyLen: wire.length,
-        plaintext: wire,
-      });
-      return;
-    }
-    if (!this.#sock) throw new Error("PlanetTransport.send: socket closed");
-    await new Promise<void>((res, rj) =>
-      this.#sock!.send(Buffer.from(wire), this.#rtp!.port, this.#rtp!.host, (e) =>
-        e ? rj(e) : res(),
-      ),
-    );
-  }
-
   async *receive(): AsyncIterable<Uint8Array> {
+    for await (const packet of this.receiveAudio()) yield* packet.frames;
+  }
+
+  async *receiveAudio(): AsyncIterable<CallAudioPacket> {
     if (!this.#srtpRecv) {
       throw new Error("PlanetTransport.receive: media not established");
     }
@@ -3046,6 +2977,46 @@ export class PlanetTransport implements CallTransport {
       if (!datagram) return;
       const { packet: wire, source } = datagram;
       try {
+        if (this.#groupJoined && (wire[1] & 0x7f) === this.#dataPayloadType) {
+          if (!this.#dataSrtpRecv) throw new Error("Group DATA crypto unavailable");
+          const data = parseRtp(await srtpDecrypt(this.#dataSrtpRecv, wire));
+          const extension = readPlanetRtpExtension(data);
+          const channel = extension?.channel ?? 0;
+          this.#debug({
+            type: "group_data_recv",
+            bytes: wire.length,
+            payloadBytes: data.payload.length,
+            payloadType: data.payloadType,
+            channel,
+            sameEndpoint: source
+              ? source.host === this.#rtp?.host && source.port === this.#rtp?.port
+              : undefined,
+            sourcePort: source?.port,
+            currentPort: this.#rtp?.port,
+          });
+          const pdtp = parsePdtp(data.payload, data.seq);
+          this.#debug({
+            type: "group_pdtp_recv",
+            serviceKind:
+              pdtp.service === "PLANET" ? "planet" : pdtp.service === "" ? "empty" : "other",
+            sections: pdtp.sections.map((s) => ({ type: s.type, bytes: s.body.length })),
+          });
+          const result = this.#pdtp.accept(pdtp, channel);
+          this.#updateRtpEndpointFromSource(source);
+          for (const reply of result.replies)
+            await this.#sendGroupPdtp(reply, extension?.sourceChannel ?? channel);
+          for (const message of result.messages) {
+            if (this.#conference.accept(message)) {
+              this.#emitConference();
+            }
+          }
+          this.#debug({
+            type: "group_pdtp_handled",
+            replies: result.replies.length,
+            messages: result.messages.length,
+          });
+          continue;
+        }
         const decrypted = await this.#decryptMediaRtp(wire);
         const parsed = parseRtp(decrypted.rtp);
         if (this.#rtp && parsed.payloadType !== this.#rtp.payloadType) {
@@ -3059,29 +3030,31 @@ export class PlanetTransport implements CallTransport {
           continue;
         }
         this.#updateRtpEndpointFromSource(source);
-        const payload = parsed.payload;
-        if (payload.length === 0) {
+        for (const audio of this.#groupJoined ? unpackXrtp(parsed) : [parsed]) {
+          const payload = audio.payload;
+          if (payload.length === 0 || audio.payloadType !== this.#rtp?.payloadType) {
+            this.#debug({
+              type: "media_ignored",
+              reason: "empty_audio_payload",
+              payloadType: audio.payloadType,
+              ssrc: audio.ssrc,
+            });
+            continue;
+          }
+          const frames = depacketizeEas2(payload);
           this.#debug({
-            type: "media_ignored",
-            reason: "empty_audio_payload",
-            payloadType: parsed.payloadType,
-            ssrc: parsed.ssrc,
+            type: "media_recv",
+            bytes: wire.length,
+            payloadBytes: payload.length,
+            payloadType: audio.payloadType,
+            firstByte: payload[0],
+            ssrc: audio.ssrc,
+            mediaKeyMode: decrypted.mode,
+            mediaKeySwitched: decrypted.switched,
+            audioFrames: frames.length,
           });
-          continue;
+          yield { ssrc: audio.ssrc, timestamp: audio.timestamp, frames };
         }
-        const frames = depacketizeEas2(payload);
-        this.#debug({
-          type: "media_recv",
-          bytes: wire.length,
-          payloadBytes: payload.length,
-          payloadType: parsed.payloadType,
-          firstByte: payload[0],
-          ssrc: parsed.ssrc,
-          mediaKeyMode: decrypted.mode,
-          mediaKeySwitched: decrypted.switched,
-          audioFrames: frames.length,
-        });
-        yield* frames;
       } catch (e) {
         this.#debug({
           type: "media_decrypt_fail",

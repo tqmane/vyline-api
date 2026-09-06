@@ -15,6 +15,8 @@
  */
 import type * as LINETypes from "@vyline/line-types";
 import type { CallAudioProfile, CallKind, CallTransport } from "../session.ts";
+import { type ConferenceMember } from "./conference.js";
+import type { CallAudioPacket } from "../groupAudio.js";
 import { type EncodedVideoFrame } from "./evs3.js";
 import { type EphemeralKeypair } from "./crypto.js";
 import { type CcConnReq, decodeCcConnRsp, decodeCcParticipateRsp, decodeCcSetupRsp, decodeCcVerifyRsp, decodePlanetMsg, type NativeSetupOffer, type PlanetSetupOfferMaterial, type PlanetUserAgent } from "./schema.js";
@@ -87,6 +89,7 @@ export interface PlanetLocalMediaOffer {
 }
 export declare class PlanetTransport implements CallTransport {
     #private;
+    onConference?: (members: ConferenceMember[]) => void;
     onVideoState?: (enabled: boolean) => void;
     constructor(opts: PlanetTransportOpts);
     /** True after the peer released the call (REL_REQ). receive() then terminates. */
@@ -126,9 +129,11 @@ export declare class PlanetTransport implements CallTransport {
     close(): Promise<void>;
     send(opusPacket: Uint8Array, opts?: {
         timestampStep?: number;
+        audioLevel?: number;
     }): Promise<void>;
     setVideoEnabled(enabled: boolean): Promise<void>;
     sendVideo(frame: EncodedVideoFrame): Promise<void>;
     receiveVideo(): AsyncIterable<EncodedVideoFrame>;
     receive(): AsyncIterable<Uint8Array>;
+    receiveAudio(): AsyncIterable<CallAudioPacket>;
 }
