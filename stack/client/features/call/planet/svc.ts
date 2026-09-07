@@ -23,7 +23,7 @@ export function packetizeSvcVp8(
   ) {
     throw new Error("Invalid SVC descriptor");
   }
-  return packetizeEvs3(data, key, pictureId, fragmentBytes).map((fragment, index, parts) => {
+  return packetizeEvs3(data, key, pictureId, fragmentBytes).map((fragment, index) => {
     let payload = fragment;
     if (index === 0) {
       const { offset } = parseEvs3(fragment);
@@ -50,8 +50,8 @@ export function packetizeSvcVp8(
       extensionData: new Uint8Array([
         2,
         3,
-        0x91 | (index === parts.length - 1 ? 0x40 : 0),
-        (resolution << 4) | 8 | (key ? 4 : 0) | (index === 0 ? 2 : 0),
+        0xd1, // VFD B/E delimit layer entries, not RTP fragments (Android 26.14.0 0x866cb4).
+        (resolution << 4) | 0x0a | (key ? 4 : 0),
         codec,
         54, // Native target bitrate: current 450 kbps encoder profile >> 13.
         seq >>> 8,
@@ -124,12 +124,11 @@ export function parseSvcVfd(
       if (
         sequence !== undefined ||
         length !== 6 ||
-        (elements[offset] & 0xc0) !== (pd.end ? 0xc0 : 0x80) ||
+        !(elements[offset] & 0x80) ||
         ((payload[0] & 0x20) !== 0 &&
           (((elements[offset] >>> 3) & 7) !== pd.spatialId ||
             (elements[offset] & 7) !== pd.temporalId)) ||
         (elements[offset + 1] & 0xc9) !== 8 ||
-        Boolean(elements[offset + 1] & 2) !== pd.begin ||
         (pd.begin && Boolean(elements[offset + 1] & 4) !== pd.key) ||
         (elements[offset + 2] !== 3 && elements[offset + 2] !== 4)
       ) {

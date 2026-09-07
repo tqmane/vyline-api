@@ -4,6 +4,19 @@ import { packetizeSvcVp8, unwrapSvcVp8, parseSvcVfd } from "./svc.ts";
 
 const vp8 = new Uint8Array([0x30, 0, 0, 0x9d, 1, 0x2a, 0x80, 2, 0x68, 1, 0, 0]);
 
+Deno.test("single-layer VFD keeps layer boundaries on every RTP fragment", () => {
+  const packets = packetizeSvcVp8(vp8, true, 1, 0xffff, 2, 4, 4);
+  assertEquals(packets.length, 3);
+  for (let i = 0; i < packets.length; i++) {
+    const packet = packets[i];
+    // Android 26.14.0 build_vfd 0x866cb4: B/E delimit layer entries, not RTP fragments.
+    assertEquals([...packet.extensionData.subarray(2, 6)], [0xd1, 0x2e, 4, 54]);
+    assertEquals(parseSvcVfd(packet.extensionData, packet.payload), (0xffff + i) & 0xffff);
+    assertEquals(parseEvs3(packet.payload, true).begin, i === 0);
+    assertEquals(parseEvs3(packet.payload, true).end, i === packets.length - 1);
+  }
+});
+
 Deno.test("SVC VP8 matches native profile/VFD fixture and reuses EVS3 reassembly", () => {
   const packets = packetizeSvcVp8(vp8, true, 0x1234, 0x1234, 1);
   assertEquals([...packets[0].payload.slice(5, 14)], [8, 0x81, 40, 3, 52, 0, 0, 0, 15]);
@@ -60,7 +73,7 @@ Deno.test("SVC VP8 rejects unsupported layers/codecs and inconsistent profile le
     [0, 4],
     [1, 2],
     [2, 0xc8],
-    [3, 0x2c],
+    [3, 0x2f], // Reserved bit, not the independent VFD layer-boundary flag.
     [4, 1],
   ] as const) {
     const vfd = packet.extensionData.slice();
