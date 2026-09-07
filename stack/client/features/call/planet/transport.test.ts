@@ -25,6 +25,7 @@ import {
   decodeMcDataRsp,
   decodeMcDataReq,
   decodeMcStreamControl,
+  decodeNativeSetupOffer,
   decodePlanetMsg,
   MC_MSG,
   packCcConnReq,
@@ -50,7 +51,7 @@ import { PlanetTransport } from "./transport.ts";
 import { encodePb } from "./cassini.ts";
 import { depacketizeEas2 } from "./eas2.ts";
 import { Evs3Assembler, packetizeEvs3, parseEvs3 } from "./evs3.ts";
-import { packetizeSvcVp8, unwrapSvcVp8 } from "./svc.ts";
+import { packetizeSvcVp8, parseSvcVfd, unwrapSvcVp8 } from "./svc.ts";
 import { buildPdtp, pdtpUint } from "./pdtp.ts";
 import { buildRtp, deriveSrtpContext, parseRtp, srtpDecrypt, srtpEncrypt } from "../srtp.ts";
 
@@ -341,6 +342,43 @@ Deno.test("PlanetTransport retains generated media offer material for SRTP setup
   assertEquals(media.material.mediaSecret.length, 30);
   assertEquals(media.offer.length, 311);
 });
+
+for (const kind of ["AUDIO", "VIDEO"] as const) {
+  Deno.test(`group participate preserves requested ${kind} kind`, async () => {
+    let request: ReturnType<typeof decodeFields> = [];
+    const transport = new PlanetTransport({
+      localMid: "u-local",
+      timeoutMs: 1,
+      wireSend(_packet, endpoint) {
+        if (!endpoint.bootstrap) return;
+        const msg = decodePlanetMsg(endpoint.plaintext);
+        if (msg.cc?.bodyTag === CC_MSG.PARTICIPATE_REQ) request = decodeFields(msg.cc.bodyBytes!);
+      },
+    });
+    await transport.connect({
+      kind,
+      route: {
+        voipAddress: "127.0.0.1",
+        voipUdpPort: 9,
+        commParam: makeRoute().commParam,
+        token: "test-token",
+        hostMid: "u-local",
+      } as CallRouteLike,
+    });
+    try {
+      await assertRejects(() => transport.joinGroupDetailed({ roomId: "c-room" }), Error, "PLANET reply timeout");
+      assertEquals(request.find((f) => f.tag === 9)?.value, kind === "VIDEO" ? 3n : 1n);
+      assertEquals(
+        new TextDecoder().decode(request.find((f) => f.tag === 13)!.value as Uint8Array),
+        kind === "VIDEO" ? "groupcall.video" : "groupcall.audio",
+      );
+      const offer = decodeNativeSetupOffer(request.find((f) => f.tag === 11)!.value as Uint8Array);
+      assertEquals(offer.media.find((m) => m.name === "V")?.enabled, kind === "VIDEO" ? 1 : 0);
+    } finally {
+      await transport.close();
+    }
+  });
+}
 
 for (const outcome of [
   "accepted",
@@ -761,6 +799,8 @@ for (const outcome of [
           [sent.payloadType, sent.ssrc, sent.timestamp, sent.extensionProfile],
           [97, 213, 9000, 0x0200],
         );
+        // The relay requires the outgoing VFD even when received packets omit it.
+        assertEquals(parseSvcVfd(sent.extensionData!, sent.payload), sent.seq);
         assertEquals((sent.payload[4] >>> 1) & 15, 2); // 640x360 is native resolution class 2.
         assertEquals(
           new Evs3Assembler().push({ ...sent, payload: unwrapSvcVp8(sent.payload) })?.data,

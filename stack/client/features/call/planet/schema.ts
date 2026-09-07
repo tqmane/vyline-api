@@ -413,6 +413,7 @@ export interface PlanetGroupParticipateOfferMaterial {
  */
 export function packNativeGroupParticipateOffer(
   material: PlanetGroupParticipateOfferMaterial,
+  initialVideo = false,
 ): Uint8Array {
   if (material.mediaSecret.length !== 30) {
     throw new Error("packNativeGroupParticipateOffer: mediaSecret must be 30 bytes");
@@ -430,7 +431,7 @@ export function packNativeGroupParticipateOffer(
   const videoCodec: Buf = { bytes: [] };
   emitBytes(videoCodec, 1, new TextEncoder().encode("V"));
   emitUint32(videoCodec, 2, 3);
-  emitUint32(videoCodec, 3, 0);
+  emitUint32(videoCodec, 3, initialVideo ? 1 : 0);
   emitUint32(videoCodec, 4, 800);
   emitUint32(videoCodec, 5, 15);
   emitUint32(videoCodec, 6, 2);

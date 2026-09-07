@@ -1932,9 +1932,10 @@ export class PlanetTransport implements CallTransport {
     this.#localMediaOffer = localMediaOffer;
     const offer =
       this.#opts.setupOffer ??
-      packNativeGroupParticipateOffer({
-        mediaSecret: localMediaOffer.material.mediaSecret,
-      });
+      packNativeGroupParticipateOffer(
+        { mediaSecret: localMediaOffer.material.mediaSecret },
+        this.#initialVideo,
+      );
     localMediaOffer.offer = offer;
     const participate: CcParticipateReq = {
       participant: this.#opts.localMid,
@@ -1945,13 +1946,13 @@ export class PlanetTransport implements CallTransport {
       mixIp: route.mixIp,
       ua: packPlanetUserAgent(this.#planetUserAgent()),
       devId: this.#deviceId,
-      commTypeFlags: 1,
+      commTypeFlags: this.#initialVideo ? 3 : 1,
       capas: this.#opts.capabilities ?? [1, 2, 3, 6, 4, 5],
       offer,
       credential:
         this.#opts.credential ??
         defaultGroupParticipateCredential(route, this.#opts.localMid, opts.roomId, cid),
-      svcKey: this.#opts.serviceKey ?? "groupcall.audio",
+      svcKey: this.#opts.serviceKey ?? (this.#initialVideo ? "groupcall.video" : "groupcall.audio"),
       netType: 1,
       mChanId: this.#localMediaChanId,
       mixPort: route.mixPort,
@@ -3261,7 +3262,7 @@ export class PlanetTransport implements CallTransport {
         timestamp: frame.timestamp,
         marker: i === packets.length - 1,
         payload: packets[i].payload,
-        ...(this.#groupJoined ? { extensionProfile: 0x0200, extensionData: new Uint8Array() } : {}),
+        ...(this.#groupJoined ? { extensionProfile: 0x0200, extensionData: packets[i].extensionData } : {}),
       });
       const wire = await srtpEncrypt(cryptoContext, rtp);
       if (this.#opts.wireSend) {

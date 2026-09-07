@@ -85,7 +85,7 @@ export interface PlanetGroupParticipateOfferMaterial {
  * shared media secret. Unlike 1:1 SETUP, the captured group offer does not
  * include a per-offer media public key/key-id/nonce block.
  */
-export declare function packNativeGroupParticipateOffer(material: PlanetGroupParticipateOfferMaterial): Uint8Array;
+export declare function packNativeGroupParticipateOffer(material: PlanetGroupParticipateOfferMaterial, initialVideo?: boolean): Uint8Array;
 export declare const CC_MSG: {
     readonly SETUP_REQ: 1;
     readonly SETUP_RSP: 2;
