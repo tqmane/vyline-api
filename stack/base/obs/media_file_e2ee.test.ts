@@ -438,3 +438,12 @@ describe("file-backed E2EE media", () => {
     expect(await readFile(targetPath, "utf8")).toBe("keep-existing-data");
   });
 });
+
+test("encrypted voice messages retain measured duration after history sync", async () => {
+  const root = await tempRoot();
+  const path = join(root, "voice.webm");
+  await writeFile(path, Buffer.from("voice fixture"));
+  const { obs, sent } = makeFileObs();
+  await obs.uploadMediaByE2EEFromFile({ dataPath: path, size: 13, mimeType: "audio/webm", oType: "audio", to: "u" + "1".repeat(32), filename: "voice.webm", durationMs: 3750 });
+  expect(sent[0]?.contentMetadata).toMatchObject({ DURATION: "3750" });
+});

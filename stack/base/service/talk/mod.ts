@@ -856,16 +856,16 @@ export class TalkService implements BaseService {
 
   async react(options: {
     id: bigint | number;
-    reaction: LINETypes.MessageReactionType;
+    reaction: LINETypes.MessageReactionType | LINETypes.PaidReactionType;
   }): Promise<void> {
     return await this.client.request.request(
       LINEStruct.react_args({
         reactRequest: {
           reqSeq: 0,
           messageId: options.id,
-          reactionType: {
-            predefinedReactionType: options.reaction,
-          },
+          reactionType: typeof options.reaction === "object"
+            ? { paidReactionType: options.reaction }
+            : { predefinedReactionType: options.reaction },
         },
       }),
       "react",

@@ -133,7 +133,7 @@ export declare class TalkService implements BaseService {
     negotiateE2EEPublicKey(...param: Parameters<typeof LINEStruct.negotiateE2EEPublicKey_args>): Promise<LINETypes.negotiateE2EEPublicKey_result["success"]>;
     react(options: {
         id: bigint | number;
-        reaction: LINETypes.MessageReactionType;
+        reaction: LINETypes.MessageReactionType | LINETypes.PaidReactionType;
     }): Promise<void>;
     createChat(...param: Parameters<typeof LINEStruct.createChat_args>): Promise<LINETypes.createChat_result["success"]>;
     setChatHiddenStatus(...param: Parameters<typeof LINEStruct.setChatHiddenStatus_args>): Promise<void>;

@@ -170,6 +170,7 @@ export declare class LineObs {
         oType: ObjType;
         to: string;
         filename?: string;
+        durationMs?: number;
         previewPath?: string;
         previewSize?: number;
         relatedMessageId?: string;

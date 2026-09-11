@@ -150,7 +150,8 @@ export declare function Pb1_EnumC13015h6(param: LINETypes.Pb1_EnumC13015h6 | und
 export declare function Pb1_E7(param: LINETypes.Pb1_E7 | undefined): (LINETypes.Pb1_E7 & number) | undefined;
 export declare function Pb1_B(param: LINETypes.Pb1_B | undefined): (LINETypes.Pb1_B & number) | undefined;
 export declare function MessageReactionType(param: LINETypes.MessageReactionType | undefined): (LINETypes.MessageReactionType & number) | undefined;
-export declare function ReactionType(param?: PartialDeep<LINETypes.ReactionType> | undefined): NestedArray;
+export declare function PaidReactionType(param?: PartialDeep<LINETypes.PaidReactionType>): NestedArray;
+export declare function ReactionType(param?: PartialDeep<LINETypes.ReactionType>): NestedArray;
 export declare function Reaction(param?: PartialDeep<LINETypes.Reaction> | undefined): NestedArray;
 export declare function Message(param?: PartialDeep<LINETypes.Message> | undefined): NestedArray;
 export declare function SquareMessageState(param: LINETypes.SquareMessageState | undefined): (LINETypes.SquareMessageState & number) | undefined;

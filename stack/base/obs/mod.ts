@@ -849,6 +849,7 @@ export class LineObs {
     oType: ObjType;
     to: string;
     filename?: string;
+    durationMs?: number;
     previewPath?: string;
     previewSize?: number;
     relatedMessageId?: string;
@@ -982,6 +983,8 @@ export class LineObs {
         contentType,
         e2ee: true,
         contentMetadata: {
+          ...(options.durationMs != null && (oType === "audio" || oType === "video")
+            ? { DURATION: String(options.durationMs) } : {}),
           SID: obsNamespace,
           OID: objId,
           FILE_SIZE: encrypted.size.toString(),
