@@ -460,8 +460,10 @@ export async function decryptLetterSealingMessage(
           const selfKey =
             (await getSelfKeyByKeyId(client, senderKeyId)) ??
             (await getSelfKeyByMid(client, myMid));
-          if (!selfKey) continue;
-          peerPubKey = Buffer.from(selfKey.pubKey, "base64");
+          peerPubKey =
+            selfKey?.keyId === senderKeyId
+              ? Buffer.from(selfKey.pubKey, "base64")
+              : await resolvePeerPubKeyForUser(client, from, senderKeyId);
         } else {
           peerPubKey = await resolvePeerPubKeyForUser(client, from, senderKeyId);
         }

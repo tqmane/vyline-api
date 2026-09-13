@@ -34,9 +34,8 @@ function isBinary(bin: Buffer) {
 }
 
 function bigInt(bin: Buffer): number | bigint {
-  const hex = bin.toString("hex");
-  const value = BigInt("0x" + hex);
-  if (value <= BigInt(Number.MAX_SAFE_INTEGER)) {
+  const value = bin.readBigInt64BE();
+  if (value >= BigInt(Number.MIN_SAFE_INTEGER) && value <= BigInt(Number.MAX_SAFE_INTEGER)) {
     return Number(value);
   }
   return value;
@@ -49,6 +48,10 @@ function readValue(
   const Thrift = thrift.Thrift;
   if (ftype == Thrift.Type.STRUCT) {
     return readStruct(input);
+  } else if (ftype == Thrift.Type.BYTE) {
+    return input.readByte();
+  } else if (ftype == Thrift.Type.I16) {
+    return input.readI16();
   } else if (ftype == Thrift.Type.I32) {
     return input.readI32();
   } else if (ftype == Thrift.Type.I64) {
@@ -90,12 +93,9 @@ function readValue(
     return input.readBool();
   } else if (ftype == Thrift.Type.DOUBLE) {
     return input.readDouble();
-  } else if (ftype == 16) {
-    // @ts-expect-error: TODO
-    return input.readIString();
-  } else if (ftype == 17) {
-    // @ts-expect-error: TODO
-    return input.readLineMid();
+  } else if (ftype == 16 || ftype == 17) {
+    // MoreCompact uses delta IDs / table references; only tmc.ts has that context.
+    throw new Error(`Unsupported Thrift field type: ${ftype}`);
   } else {
     input.skip(ftype);
     return;
