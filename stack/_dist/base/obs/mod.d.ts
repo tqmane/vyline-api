@@ -58,7 +58,7 @@ export declare function encryptE2eeMediaFile(sourcePath: string, targetPath: str
  * Authenticate and decrypt an OBS response into an unpublished file. Only the
  * final 32-byte tag and the current network chunk are retained in memory.
  */
-export declare function decryptE2eeMediaResponseToFile(response: Response, targetPath: string, keys: E2eeMediaKeys, maxBytes?: number, signal?: AbortSignal, beforeWrite?: E2eeMediaBeforeWrite): Promise<E2eeMediaFileResult>;
+export declare function decryptE2eeMediaResponseToFile(response: Response, targetPath: string, keys: E2eeMediaKeys, maxBytes?: number, signal?: AbortSignal, beforeWrite?: E2eeMediaBeforeWrite, isVideo?: boolean): Promise<E2eeMediaFileResult>;
 export declare class LineObs {
     client: BaseClient;
     prefix: string;

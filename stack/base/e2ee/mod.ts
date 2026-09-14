@@ -10,6 +10,7 @@ import { ContentType } from "../thrift/readwrite/struct.js";
 import CryptoJS from "crypto-js";
 import { gcmsiv } from "@noble/ciphers/aes.js";
 import type { LooseType } from "@vyline/loose-types";
+import { createVideoMediaHmac } from "./videoMediaHmac.js";
 
 interface GroupKey {
   privKey: string;
@@ -1093,7 +1094,7 @@ export class E2EE {
     };
   }
 
-  async decryptByKeyMaterial(rawData: Buffer, keyMaterial: Buffer | string): Promise<Buffer> {
+  async decryptByKeyMaterial(rawData: Buffer, keyMaterial: Buffer | string, isVideo = false): Promise<Buffer> {
     // Decrypt file for E2EE Next
     if (typeof keyMaterial === "string") {
       keyMaterial = Buffer.from(keyMaterial, "base64");
@@ -1103,7 +1104,11 @@ export class E2EE {
     const ciphertext = rawData.subarray(0, -32);
     const tag = rawData.subarray(-32);
     const expected = this.signData(ciphertext, keys.macKey);
-    if (!crypto.timingSafeEqual(expected, tag)) {
+    const videoHmac = isVideo ? createVideoMediaHmac(keys.macKey) : undefined;
+    videoHmac?.update(ciphertext);
+    const validVideoTag = videoHmac ? crypto.timingSafeEqual(videoHmac.digest(), tag) : false;
+    // Older Vyline uploads use a direct ciphertext HMAC, including for videos.
+    if (!crypto.timingSafeEqual(expected, tag) && !validVideoTag) {
       throw new Error("E2EE media authentication failed");
     }
     return await this.___decryptAESCTR(keys.encKey, keys.nonce, ciphertext);

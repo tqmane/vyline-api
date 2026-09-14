@@ -67,7 +67,7 @@ export declare class E2EE {
         keyMaterial: string;
         encryptedData: Buffer;
     }>;
-    decryptByKeyMaterial(rawData: Buffer, keyMaterial: Buffer | string): Promise<Buffer>;
+    decryptByKeyMaterial(rawData: Buffer, keyMaterial: Buffer | string, isVideo?: boolean): Promise<Buffer>;
     /**
      * AES-GCM-SIV authenticated decryption. RFC 8452.
      *

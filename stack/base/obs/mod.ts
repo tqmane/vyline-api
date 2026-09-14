@@ -4,6 +4,7 @@ import { open, rm, stat } from "node:fs/promises";
 import { type BaseClient, InternalError } from "../core/mod.js";
 import { MimeType } from "./mime.js";
 import crypto from "node:crypto";
+import { createVideoMediaHmac } from "../e2ee/videoMediaHmac.js";
 import type { ContentType, Message } from "@vyline/line-types";
 import { writeStruct } from "../thrift/readwrite/write.js";
 // @ts-types="thrift-types"
@@ -165,6 +166,7 @@ export async function decryptE2eeMediaResponseToFile(
   maxBytes = DEFAULT_MAX_E2EE_MEDIA_BYTES,
   signal?: AbortSignal,
   beforeWrite?: E2eeMediaBeforeWrite,
+  isVideo = false,
 ): Promise<E2eeMediaFileResult> {
   assertMediaByteLimit(maxBytes);
   signal?.throwIfAborted();
@@ -198,10 +200,12 @@ export async function decryptE2eeMediaResponseToFile(
     reader = response.body.getReader();
     const decipher = crypto.createDecipheriv("aes-256-ctr", keys.encKey, keys.nonce);
     const hmac = crypto.createHmac("sha256", keys.macKey);
+    const videoHmac = isVideo ? createVideoMediaHmac(keys.macKey) : undefined;
     const consumeCiphertext = async (ciphertext: Uint8Array): Promise<void> => {
       signal?.throwIfAborted();
       if (ciphertext.byteLength === 0) return;
       hmac.update(ciphertext);
+      videoHmac?.update(ciphertext);
       const plain = decipher.update(ciphertext);
       if (plain.byteLength > 0) {
         await beforeWrite?.(outputBytes + plain.byteLength, plain.byteLength);
@@ -246,7 +250,9 @@ export async function decryptE2eeMediaResponseToFile(
       throw new Error("encrypted media response is missing its authentication tag");
     }
     const expectedTag = hmac.digest();
-    if (!crypto.timingSafeEqual(expectedTag, tail)) {
+    const validVideoTag = videoHmac ? crypto.timingSafeEqual(videoHmac.digest(), tail) : false;
+    // Keep previously sent direct-HMAC videos readable; both formats authenticate.
+    if (!crypto.timingSafeEqual(expectedTag, tail) && !validVideoTag) {
       throw new Error("encrypted media authentication failed");
     }
     const final = decipher.final();
@@ -1019,6 +1025,7 @@ export class LineObs {
     talkMeta: string;
     keyMaterial: string;
     fileName: string;
+    isVideo: boolean;
   } | null> {
     if (!(message.to[0] === "u" || message.to[0] === "c")) {
       throw new InternalError("ObsError", "Invalid mid");
@@ -1058,7 +1065,7 @@ export class LineObs {
         ).toString("base64"),
       }),
     ).toString("base64");
-    return { oid, obsPath: `talk/${sid}`, talkMeta, keyMaterial, fileName };
+    return { oid, obsPath: `talk/${sid}`, talkMeta, keyMaterial, fileName, isVideo: sid === "emv" };
   }
 
   public async downloadMediaByE2EEToFile(
@@ -1092,6 +1099,7 @@ export class LineObs {
         maxBytes,
         signal,
         beforeWrite,
+        context.isVideo,
       );
       return {
         ...result,
@@ -1117,6 +1125,7 @@ export class LineObs {
         (await this.client.e2ee.decryptByKeyMaterial(
           Buffer.from(await data.arrayBuffer()),
           context.keyMaterial,
+          context.isVideo,
         )) as unknown as BlobPart,
       ],
       context.fileName,
