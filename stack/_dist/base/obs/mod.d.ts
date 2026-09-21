@@ -94,7 +94,11 @@ export declare class LineObs {
     /**
      * @description Upload obs message to talk.
      */
-    uploadObjTalk(to: string, type: ObjType, data: Blob, oid?: string, filename?: string, durationMs?: number, reqseqOverride?: number, signal?: AbortSignal): Promise<{
+    uploadObjTalk(to: string, type: ObjType, data: Blob, oid?: string, filename?: string, durationMs?: number, reqseqOverride?: number, signal?: AbortSignal, batchMeta?: {
+        total: number;
+        sequence: number;
+        gid: string;
+    }): Promise<{
         objId: string;
         objHash: string;
         headers: Headers;
@@ -166,6 +170,7 @@ export declare class LineObs {
         oType: ObjType;
         to: string;
         filename?: string;
+        durationMs?: number;
         previewPath?: string;
         previewSize?: number;
         relatedMessageId?: string;

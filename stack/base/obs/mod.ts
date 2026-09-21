@@ -72,11 +72,7 @@ const E2EE_MEDIA_TAG_BYTES = 32;
 const DEFAULT_MAX_E2EE_MEDIA_BYTES = 10 * 1024 * 1024 * 1024;
 
 function assertMediaByteLimit(maxBytes: number): void {
-  if (
-    !Number.isSafeInteger(maxBytes) ||
-    maxBytes <= 0 ||
-    maxBytes > DEFAULT_MAX_E2EE_MEDIA_BYTES
-  ) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > DEFAULT_MAX_E2EE_MEDIA_BYTES) {
     throw new Error("media byte limit is invalid");
   }
 }
@@ -467,8 +463,8 @@ export class LineObs {
       obsPath: `${toType}/m/${oid ?? "reqseq"}`,
       filename: param.name,
       params: param,
-      addHeaders,
       signal,
+      addHeaders,
     });
   }
 
@@ -520,9 +516,7 @@ export class LineObs {
               "ObsError",
               "Grouped upload did not return x-line-message-gid",
             );
-            for (let rest = index + 1; rest < items.length; rest++) {
-              out.push({ error });
-            }
+            for (let rest = index + 1; rest < items.length; rest++) out.push({ error });
             break;
           }
           gid = serverGid;
@@ -530,9 +524,7 @@ export class LineObs {
       } catch (error) {
         out.push({ error });
         if (grouped && index === 0) {
-          for (let rest = index + 1; rest < items.length; rest++) {
-            out.push({ error });
-          }
+          for (let rest = index + 1; rest < items.length; rest++) out.push({ error });
           break;
         }
       }
@@ -549,15 +541,7 @@ export class LineObs {
     relatedMessageId?: string;
     messageRelationType?: "FORWARD" | "AUTO_REPLY" | "SUBORDINATE" | "REPLY";
   }): Promise<Message> {
-    const {
-      to,
-      type,
-      data,
-      filename,
-      durationMs,
-      relatedMessageId,
-      messageRelationType,
-    } = options;
+    const { to, type, data, filename, durationMs, relatedMessageId, messageRelationType } = options;
     const ext = MimeType[data.type as keyof typeof MimeType];
     const typeSet: {
       image: [string, 1];
@@ -865,6 +849,7 @@ export class LineObs {
     oType: ObjType;
     to: string;
     filename?: string;
+    durationMs?: number;
     previewPath?: string;
     previewSize?: number;
     relatedMessageId?: string;
@@ -939,13 +924,7 @@ export class LineObs {
     const encryptedPreviewPath = `${dataPath}.${crypto.randomUUID()}.e2ee-preview-partial`;
 
     try {
-      const encrypted = await encryptE2eeMediaFile(
-        dataPath,
-        encryptedPath,
-        keys,
-        maxBytes,
-        signal,
-      );
+      const encrypted = await encryptE2eeMediaFile(dataPath, encryptedPath, keys, maxBytes, signal);
       const encryptedBody = await openAsBlob(encrypted.path, {
         type: "application/octet-stream",
       });
@@ -1004,6 +983,8 @@ export class LineObs {
         contentType,
         e2ee: true,
         contentMetadata: {
+          ...(options.durationMs != null && (oType === "audio" || oType === "video")
+            ? { DURATION: String(options.durationMs) } : {}),
           SID: obsNamespace,
           OID: objId,
           FILE_SIZE: encrypted.size.toString(),
