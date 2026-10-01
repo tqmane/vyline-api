@@ -23,6 +23,7 @@ export function packetizeSvcVp8(
   ) {
     throw new Error("Invalid SVC descriptor");
   }
+  const targetBitrateCode = resolution === 3 ? 183 : 54;
   return packetizeEvs3(data, key, pictureId, fragmentBytes).map((fragment, index) => {
     let payload = fragment;
     if (index === 0) {
@@ -53,7 +54,7 @@ export function packetizeSvcVp8(
         0xd1, // VFD B/E delimit layer entries, not RTP fragments (Android 26.14.0 0x866cb4).
         (resolution << 4) | 0x0a | (key ? 4 : 0),
         codec,
-        54, // Native target bitrate: current 450 kbps encoder profile >> 13.
+        targetBitrateCode, // 450 kbps below HD; 1.5 Mbps for the 720p profile (bps >> 13).
         seq >>> 8,
         seq & 255,
       ]),
