@@ -373,6 +373,47 @@ describe("file-backed E2EE media", () => {
     expect(await readFile(targetPath)).toEqual(source);
   });
 
+  test("a preview download reads the thumbnail object next to the original", async () => {
+    const root = await tempRoot();
+    const targetPath = join(root, "preview.bin");
+    const thumbnail = Buffer.from("encrypted thumbnail");
+    const keyMaterial = Buffer.alloc(32, 0x5a);
+    const e2ee = new E2EE({} as never);
+    const encrypted = await e2ee.encryptByKeyMaterial(thumbnail, keyMaterial);
+    const fixture = makeFileObs();
+    const requests: Array<{ oid: string; obsPath: string }> = [];
+    fixture.obs.downloadObjectResponseForService = (async (request: {
+      oid: string;
+      obsPath: string;
+    }) => {
+      requests.push(request);
+      return new Response(encrypted.encryptedData, {
+        headers: { "content-type": "application/octet-stream" },
+      });
+    }) as never;
+
+    const message = {
+      id: "123456",
+      to: "u-recipient",
+      contentMetadata: {
+        OID: "OBJ-2",
+        SID: "emv",
+        keyMaterial: keyMaterial.toString("base64"),
+        fileName: "clip.mp4",
+      },
+    } as never;
+
+    await fixture.obs.downloadMediaByE2EEToFile(message, targetPath, 1024, undefined, undefined, true);
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ oid: "OBJ-2__ud-preview", obsPath: "talk/emv" });
+    expect(await readFile(targetPath)).toEqual(thumbnail);
+
+    // The original object is addressed only when no preview was requested.
+    await fixture.obs.downloadMediaByE2EEToFile(message, join(root, "original.bin"), 1024);
+    expect(requests[1]).toMatchObject({ oid: "OBJ-2", obsPath: "talk/emv" });
+  });
+
   test("rejects invalid download metadata before opening the OBS response", async () => {
     const root = await tempRoot();
     const fixture = makeFileObs();

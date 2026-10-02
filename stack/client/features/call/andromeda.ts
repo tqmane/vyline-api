@@ -94,6 +94,8 @@ export class AndromedaTransport implements CallTransport {
   };
   #rtpQueue: Uint8Array[] = [];
   #rtpWaiters: ((b: Uint8Array | null) => void)[] = [];
+  /** Sticky: the dialog is gone, so a read loop started later must end immediately. */
+  #closed = false;
 
   constructor(opts: AndromedaTransportOpts) {
     this.#opts = opts;
@@ -113,7 +115,14 @@ export class AndromedaTransport implements CallTransport {
         (u8[0] === 0x53 /* S */ || (/[A-Z]/.test(String.fromCharCode(u8[0])) && u8.includes(0x20)));
       if (isSip) {
         const w = this.#pending.shift();
-        if (w) w(u8);
+        if (w) {
+          w(u8);
+        } else if (this.#srtpRecv) {
+          // No handshake waiter is left, so this is an in-dialog request (BYE on
+          // hangup). Dropping it leaves receive() waiting forever and the call
+          // stuck in-call after the peer has gone.
+          this.#onInDialogSip(u8);
+        }
       } else if (this.#rtp && rinfo.port === this.#rtp.port) {
         this.#enqueueRtp(u8);
       } else {
@@ -142,7 +151,47 @@ export class AndromedaTransport implements CallTransport {
     }
     if (this.#refreshTimer !== undefined) clearTimeout(this.#refreshTimer);
     if (this.#keepaliveTimer !== undefined) clearTimeout(this.#keepaliveTimer);
+    this.#closed = true;
     await new Promise<void>((res) => this.#sock?.close(() => res()));
+    this.#sock = undefined;
+    // receive() only ends when a waiter resolves with null, so close() has to drain
+    // them. Without this the read loop and its recv task outlive the transport.
+    this.#drainReceivers();
+  }
+
+  #drainReceivers(): void {
+    for (const waiter of this.#rtpWaiters.splice(0)) waiter(null);
+    for (const waiter of this.#pending.splice(0)) waiter(new Uint8Array(0));
+  }
+
+  /**
+   * An in-dialog SIP request arrived after the handshake (typically a peer BYE).
+   * Acknowledge it so the peer stops retransmitting, then end the media read loop
+   * so the session manager can observe the hangup.
+   */
+  async #onInDialogSip(raw: Uint8Array): Promise<void> {
+    const message = parseSip(raw);
+    if (message.startLine.startsWith("BYE")) {
+      const ep = routeEndpoint(this.#route!);
+      const seq = Number(message.headers["CSeq"] ?? "0") || this.#cseq;
+      await this.#sendTo({ host: ep.host, port: ep.port }, {
+        startLine: `SIP/2.0 200 OK`,
+        headers: {
+          Via: message.headers["Via"] ?? `SIP/2.0/UDP ${this.#opts.localMid}.invalid;branch=${newBranch()}`,
+          "Max-Forwards": "70",
+          From: message.headers["To"] ?? this.#sipFrom ?? "",
+          To: message.headers["From"] ?? "",
+          "Call-ID": this.#callId ?? message.headers["Call-ID"] ?? "",
+          CSeq: message.headers["CSeq"] ?? `${seq} BYE`,
+          "User-Agent": this.#opts.userAgent ?? "Line/26.6.2",
+          "Content-Length": "0",
+        },
+        body: "",
+      }).catch(() => undefined);
+      this.#peerToTag = undefined;
+    }
+    this.#closed = true;
+    this.#drainReceivers();
   }
 
   /** Send SIP BYE to terminate an established dialog. Best-effort. */
@@ -338,6 +387,7 @@ export class AndromedaTransport implements CallTransport {
       throw new Error("AndromedaTransport.receive: call not established (INVITE first)");
     }
     while (true) {
+      if (this.#closed) return;
       const wire = await this.#takeRtp();
       if (!wire) return;
       try {

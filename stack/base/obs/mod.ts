@@ -1019,7 +1019,7 @@ export class LineObs {
     }
   }
 
-  private async prepareE2eeMediaDownload(message: Message): Promise<{
+  private async prepareE2eeMediaDownload(message: Message, preview = false): Promise<{
     oid: string;
     obsPath: string;
     talkMeta: string;
@@ -1065,7 +1065,17 @@ export class LineObs {
         ).toString("base64"),
       }),
     ).toString("base64");
-    return { oid, obsPath: `talk/${sid}`, talkMeta, keyMaterial, fileName, isVideo: sid === "emv" };
+    return {
+      // Android uploads the thumbnail next to the original under "<oid>__ud-preview",
+      // encrypted with the same keyMaterial. When no thumbnail was uploaded the
+      // object is byte-identical to the original, so asking for it is always safe.
+      oid: preview ? `${oid}__ud-preview` : oid,
+      obsPath: `talk/${sid}`,
+      talkMeta,
+      keyMaterial,
+      fileName,
+      isVideo: sid === "emv",
+    };
   }
 
   public async downloadMediaByE2EEToFile(
@@ -1074,10 +1084,11 @@ export class LineObs {
     maxBytes = DEFAULT_MAX_E2EE_MEDIA_BYTES,
     signal?: AbortSignal,
     beforeWrite?: E2eeMediaBeforeWrite,
+    preview = false,
   ): Promise<DownloadedE2eeMediaFile | null> {
     assertMediaByteLimit(maxBytes);
     signal?.throwIfAborted();
-    const context = await this.prepareE2eeMediaDownload(message);
+    const context = await this.prepareE2eeMediaDownload(message, preview);
     if (!context) return null;
     const keyMaterial = Buffer.from(context.keyMaterial, "base64");
     if (keyMaterial.byteLength !== 32) {
@@ -1112,8 +1123,8 @@ export class LineObs {
     }
   }
 
-  public async downloadMediaByE2EE(message: Message): Promise<File | null> {
-    const context = await this.prepareE2eeMediaDownload(message);
+  public async downloadMediaByE2EE(message: Message, preview = false): Promise<File | null> {
+    const context = await this.prepareE2eeMediaDownload(message, preview);
     if (!context) return null;
     const data = await this.downloadObjectForService({
       oid: context.oid,

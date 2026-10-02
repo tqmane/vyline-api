@@ -179,7 +179,7 @@ export declare class LineObs {
         signal?: AbortSignal;
     }): Promise<Message>;
     private prepareE2eeMediaDownload;
-    downloadMediaByE2EEToFile(message: Message, targetPath: string, maxBytes?: number, signal?: AbortSignal, beforeWrite?: E2eeMediaBeforeWrite): Promise<DownloadedE2eeMediaFile | null>;
-    downloadMediaByE2EE(message: Message): Promise<File | null>;
+    downloadMediaByE2EEToFile(message: Message, targetPath: string, maxBytes?: number, signal?: AbortSignal, beforeWrite?: E2eeMediaBeforeWrite, preview?: boolean): Promise<DownloadedE2eeMediaFile | null>;
+    downloadMediaByE2EE(message: Message, preview?: boolean): Promise<File | null>;
 }
 export {};
