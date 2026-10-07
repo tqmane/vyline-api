@@ -149,7 +149,7 @@ interface VideoRtpPacket {
 export class Evs3Assembler {
   constructor(private readonly onInvalid?: (reason: string) => void) {}
   #picture?: Picture;
-  #latest?: { timestamp: number; ssrc: number };
+  #latest?: { timestamp: number; ssrc: number; seq: number };
   #lastSequence?: number;
   #needsKey = true;
   #early?: { id: string; since: number; bytes: number; packets: Map<number, VideoRtpPacket> };
@@ -168,7 +168,7 @@ export class Evs3Assembler {
       const id = `${packet.ssrc}/${packet.timestamp}/${pd.pictureId}`;
       if (this.#early && now - this.#early.since > 1000) this.#early = undefined;
       if (!pd.begin && !this.#picture) {
-        if (!this.#isNewer(packet)) return;
+        if (!this.#isNewer(packet, true)) return;
         if (this.#early?.id !== id) this.#early = { id, since: now, bytes: 0, packets: new Map() };
         const early = this.#early;
         const existing = early.packets.get(packet.seq);
@@ -177,7 +177,7 @@ export class Evs3Assembler {
             existing.payload.length !== packet.payload.length ||
             existing.payload.some((b, i) => b !== packet.payload[i])
           ) {
-            this.#latest = { timestamp: packet.timestamp, ssrc: packet.ssrc };
+            this.#latest = { timestamp: packet.timestamp, ssrc: packet.ssrc, seq: packet.seq };
             throw new Error("Conflicting early EVS3 duplicate");
           }
           return;
@@ -213,10 +213,15 @@ export class Evs3Assembler {
     this.#picture = undefined;
   }
 
-  #isNewer(packet: VideoRtpPacket): boolean {
+  #isNewer(packet: VideoRtpPacket, keyframe = false): boolean {
     if (!this.#latest) return true;
     const advance = (packet.timestamp - this.#latest.timestamp) >>> 0;
-    return this.#latest.ssrc === packet.ssrc && advance > 0 && advance < 0x80000000;
+    const sequence = (packet.seq - this.#latest.seq) & 0xffff;
+    // Encoders can restart their presentation clock while the RTP stream stays
+    // alive. A fresh keyframe with forward sequence numbers starts that epoch.
+    // Sequence ordering also keeps delayed packets from reviving the old clock.
+    return this.#latest.ssrc === packet.ssrc && sequence > 0 && sequence < 0x8000 &&
+      (keyframe || (advance > 0 && advance < 0x80000000));
   }
 
   #push(packet: VideoRtpPacket, now: number): EncodedVideoFrame | undefined {
@@ -228,8 +233,8 @@ export class Evs3Assembler {
         if (this.#picture && ((packet.seq - this.#picture.start) & 0xffff) < 2048) this.#discard();
         return;
       }
-      if (!this.#isNewer(packet)) return;
-      this.#latest = { timestamp: packet.timestamp, ssrc: packet.ssrc };
+      if (!this.#isNewer(packet, pd.key)) return;
+      this.#latest = { timestamp: packet.timestamp, ssrc: packet.ssrc, seq: packet.seq };
       if (
         this.#picture ||
         (this.#lastSequence !== undefined && packet.seq !== ((this.#lastSequence + 1) & 0xffff))

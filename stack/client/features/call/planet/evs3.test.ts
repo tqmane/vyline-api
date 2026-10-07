@@ -12,6 +12,16 @@ const pkt = (payload: Uint8Array, seq: number, timestamp = 90, ssrc = 211) => ({
   marker: Boolean(payload[0] & 4),
 });
 
+Deno.test("EVS3 accepts a fresh keyframe after an encoder clock restart without reopening old packets", () => {
+  const assembler = new Evs3Assembler();
+  const old = pkt(packetizeEvs3(au, true, 1)[0], 100, 900_000);
+  assertEquals(assembler.push(old)?.data, au);
+  const restarted = pkt(packetizeEvs3(au, true, 2)[0], 101, 0);
+  assertEquals(assembler.push(restarted)?.data, au);
+  assertEquals(assembler.push(old), undefined);
+  assertEquals(assembler.push(pkt(packetizeEvs3(delta, false, 3)[0], 102, 90))?.data, delta);
+});
+
 Deno.test("EVS3 VP8 includes the native 18-bit size prefix only on B packets", () => {
   const vp8 = au;
   const packets = packetizeEvs3(vp8, true, 0x1234);
