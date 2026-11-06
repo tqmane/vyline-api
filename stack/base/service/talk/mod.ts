@@ -6,6 +6,7 @@ import { LINEStruct } from "../../thrift/mod.js";
 import type { Buffer } from "node:buffer";
 import { ContentType } from "../../thrift/readwrite/struct.js";
 import type { LooseType } from "@vyline/loose-types";
+import { legacyMessagingHeaders } from "../../request/legacy_messaging.js";
 import {
   COMPACT_E2EE_MESSAGE_ENDPOINT,
   COMPACT_PLAIN_MESSAGE_ENDPOINT,
@@ -171,6 +172,12 @@ export class TalkService implements BaseService {
         this.protocolType,
         true,
         this.requestPath,
+        contentMetadata?.NOTIFICATION_DISABLED === "true"
+          ? legacyMessagingHeaders(
+              this.client.request.getHeader(),
+              `https://${this.client.request.endpoint}${this.requestPath}`,
+            )
+          : {},
       );
     } catch (error) {
       if (
@@ -363,13 +370,22 @@ export class TalkService implements BaseService {
     );
   }
 
-  async unsendMessage(...param: Parameters<typeof LINEStruct.unsendMessage_args>): Promise<void> {
+  async unsendMessage(
+    param?: Parameters<typeof LINEStruct.unsendMessage_args>[0],
+    options: { legacy?: boolean } = {},
+  ): Promise<void> {
     return await this.client.request.request(
-      LINEStruct.unsendMessage_args(...param),
+      LINEStruct.unsendMessage_args(param),
       "unsendMessage",
       this.protocolType,
       true,
       this.requestPath,
+      options.legacy
+        ? legacyMessagingHeaders(
+            this.client.request.getHeader(),
+            `https://${this.client.request.endpoint}${this.requestPath}`,
+          )
+        : {},
     );
   }
 

@@ -162,8 +162,8 @@ export class RequestClient {
     });
     const response = this.shouldUseLegyEncryptedRequest(path, headers)
       ? await this.legyTransport.fetch(request, this.client.fetch, {
-          application: this.systemType,
-          userAgent: this.userAgent,
+          application: request.headers.get("x-line-application") ?? this.systemType,
+          userAgent: request.headers.get("user-agent") ?? this.userAgent,
           endpoint: this.client.legy.endpoint,
         })
       : await this.client.fetch(request);

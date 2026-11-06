@@ -84,7 +84,9 @@ export declare class TalkService implements BaseService {
     getProfile(...param: Parameters<typeof LINEStruct.getProfile_args>): Promise<LINETypes.getProfile_result["success"]>;
     getSettings(...param: Parameters<typeof LINEStruct.getSettings_args>): Promise<LINETypes.getSettings_result["success"]>;
     sendChatChecked(...param: Parameters<typeof LINEStruct.sendChatChecked_args>): Promise<void>;
-    unsendMessage(...param: Parameters<typeof LINEStruct.unsendMessage_args>): Promise<void>;
+    unsendMessage(param?: Parameters<typeof LINEStruct.unsendMessage_args>[0], options?: {
+        legacy?: boolean;
+    }): Promise<void>;
     silentlyUnsendMessage(options: {
         messageId: string;
         reqSeq?: number;

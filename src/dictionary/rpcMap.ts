@@ -99,6 +99,8 @@ export const RPC_DICTIONARY: readonly RpcEntry[] = [
     domainApi: "session.talk.sendText",
     backendApi: "sendMessage",
     category: "talk",
+    notes:
+      'Mute: contentMetadata.NOTIFICATION_DISABLED="true" (Android 26.13.0 gd8.c.a); iOS requests advertise 15.16.1 per RUIN ClientVersionAdvertisement.x, preserving session identity.',
   },
   {
     canonicalName: "unsendMessage",
@@ -111,6 +113,8 @@ export const RPC_DICTIONARY: readonly RpcEntry[] = [
     domainApi: "session.talk.unsend",
     backendApi: "unsendMessage",
     category: "talk",
+    notes:
+      "The legacy option advertises iOS 15.16.1 per request for the caller-validated 24-hour window; native/premium requests keep their original headers.",
   },
   {
     canonicalName: "silentlyUnsendMessage",

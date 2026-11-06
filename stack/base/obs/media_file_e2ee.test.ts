@@ -32,7 +32,7 @@ function makeFileObs(options?: {
   sendMessage?: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
 }) {
   const e2ee = new E2EE({} as never);
-  const uploaded: Array<{ bytes: Buffer; obsPath: string }> = [];
+  const uploaded: Array<{ bytes: Buffer; obsPath: string; legacyMessaging?: boolean }> = [];
   const sent: Record<string, unknown>[] = [];
   let deriveCalls = 0;
   const client = {
@@ -62,10 +62,11 @@ function makeFileObs(options?: {
     log() {},
   };
   const obs = new LineObs(client as never);
-  obs.uploadObjectForService = (async (upload: { data: Blob; obsPath?: string }) => {
+  obs.uploadObjectForService = (async (upload: { data: Blob; obsPath?: string; legacyMessaging?: boolean }) => {
     uploaded.push({
       bytes: Buffer.from(await upload.data.arrayBuffer()),
       obsPath: upload.obsPath ?? "",
+      legacyMessaging: upload.legacyMessaging,
     });
     return { objId: "OBJ-1", objHash: "HASH-1", headers: new Headers() };
   }) as never;
@@ -218,7 +219,7 @@ describe("file-backed E2EE media", () => {
     await expectOnlyFiles(root, ["source.bin"]);
   });
 
-  test("uploads a compatible encrypted file, sends its metadata, and removes temporary files", async () => {
+  test.each([undefined, true])("uploads a compatible encrypted file with mute=%s and removes temporary files", async (mute) => {
     const root = await tempRoot();
     const sourcePath = join(root, "report.pdf");
     const source = Buffer.from("file-backed OBS upload payload");
@@ -232,12 +233,14 @@ describe("file-backed E2EE media", () => {
       oType: "file",
       to: "u-recipient",
       filename: "report.pdf",
+      mute,
     });
 
     expect(message.id).toBe("message-1");
     expect(fixture.uploaded).toHaveLength(1);
     expect(fixture.uploaded[0]?.obsPath).toContain("talk/emf/reqid-");
     expect(fixture.uploaded[0]?.bytes.byteLength).toBe(source.byteLength + 32);
+    expect(fixture.uploaded[0]?.legacyMessaging).toBe(mute);
     expect(fixture.sent).toHaveLength(1);
     const sent = fixture.sent[0]!;
     expect(sent.contentType).toBe(14);
@@ -251,6 +254,7 @@ describe("file-backed E2EE media", () => {
       e2eeVersion: "2",
     });
     const metadata = sent.contentMetadata as Record<string, string>;
+    expect(metadata.NOTIFICATION_DISABLED).toBe(mute ? "true" : undefined);
     expect(
       await fixture.e2ee.decryptByKeyMaterial(fixture.uploaded[0]!.bytes, metadata.keyMaterial!),
     ).toEqual(source);

@@ -98,6 +98,8 @@ export class LegyEncryptedTransport {
   #outerHeaders(request: Request, options: LegyEncryptedFetchOptions): Headers {
     const headers = new Headers();
     headers.set("x-line-application", options.application);
+    const applicationVersion = request.headers.get("x-line-application-version");
+    if (applicationVersion) headers.set("x-line-application-version", applicationVersion);
     headers.set("x-le", LEGY_LE);
     headers.set("x-lap", LEGY_LAP);
     headers.set("x-lpv", request.headers.get("x-lpv") ?? "1");
