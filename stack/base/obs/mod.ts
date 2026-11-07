@@ -7,6 +7,7 @@ import crypto from "node:crypto";
 import { createVideoMediaHmac } from "../e2ee/videoMediaHmac.js";
 import type { ContentType, Message } from "@vyline/line-types";
 import { writeStruct } from "../thrift/readwrite/write.js";
+import { legacyMessagingHeaders } from "../request/legacy_messaging.js";
 // @ts-types="thrift-types"
 import * as thrift from "thrift";
 
@@ -383,6 +384,7 @@ export class LineObs {
     reqseqOverride?: number,
     signal?: AbortSignal,
     batchMeta?: { total: number; sequence: number; gid: string },
+    mute?: boolean,
   ): Promise<{
     objId: string;
     objHash: string;
@@ -426,38 +428,42 @@ export class LineObs {
       param.duration = (durationMs ?? 1919).toString();
     }
     const toType: "talk" | "g2" = to[0] === "m" || to[0] === "t" ? "g2" : "talk";
+    if (mute && toType !== "talk") {
+      throw new InternalError("ObsError", "Mute media send is not supported for OpenChat");
+    }
     const senderMid = this.client.profile?.mid;
     if (!oid && !senderMid) {
       throw new InternalError("ObsError", "Profile MID is required for talk reqseq upload");
     }
+    // Android 26.13.0 gd8.c.a: silent media uses Message field 18 in X-Talk-Meta.
+    const contentMetadata: Record<string, string> = {
+      ...(mute ? { NOTIFICATION_DISABLED: "true" } : {}),
+      ...(batchMeta
+        ? {
+            GTOTAL: String(batchMeta.total),
+            GID: batchMeta.gid,
+            GSEQ: String(batchMeta.sequence),
+          }
+        : {}),
+    };
     const addHeaders: Record<string, string> = {
       ...(senderMid ? { "X-Line-Mid": senderMid } : {}),
-      ...(batchMeta
+      ...(Object.keys(contentMetadata).length
         ? {
             "X-Talk-Meta": Buffer.from(
               JSON.stringify({
                 message: Buffer.from(
                   writeStruct(
-                    [
-                      [
-                        13,
-                        18,
-                        [
-                          11,
-                          11,
-                          {
-                            GTOTAL: String(batchMeta.total),
-                            GID: batchMeta.gid,
-                            GSEQ: String(batchMeta.sequence),
-                          },
-                        ],
-                      ],
-                    ],
+                    [[13, 18, [11, 11, contentMetadata]]],
                     thrift.TBinaryProtocol,
                   ),
                 ).toString("base64"),
               }),
             ).toString("base64"),
+          }
+        : {}),
+      ...(batchMeta
+        ? {
             "Upload-Draft-Interop-Version": "6",
             "Upload-Complete": "?1",
           }
@@ -471,6 +477,7 @@ export class LineObs {
       params: param,
       signal,
       addHeaders,
+      legacyMessaging: mute,
     });
   }
 
@@ -483,6 +490,7 @@ export class LineObs {
       durationMs?: number;
     }>,
     signal?: AbortSignal,
+    mute?: boolean,
   ): Promise<Array<{ objId: string; objHash: string; headers: Headers } | { error: unknown }>> {
     if (!items.length) return [];
     const reqseqs = await this.client.getReqseqs("talk", items.length);
@@ -513,6 +521,7 @@ export class LineObs {
                 gid,
               }
             : undefined,
+          mute,
         );
         out.push(result);
         if (grouped && index === 0) {
@@ -546,6 +555,7 @@ export class LineObs {
     durationMs?: number;
     relatedMessageId?: string;
     messageRelationType?: "FORWARD" | "AUTO_REPLY" | "SUBORDINATE" | "REPLY";
+    mute?: boolean;
   }): Promise<Message> {
     const { to, type, data, filename, durationMs, relatedMessageId, messageRelationType } = options;
     const ext = MimeType[data.type as keyof typeof MimeType];
@@ -574,6 +584,9 @@ export class LineObs {
       params["duration"] = (durationMs ?? 1919).toString();
     }
     const toType: "talk" | "g2" = to[0] === "m" || to[0] === "t" ? "g2" : "talk";
+    if (options.mute && toType !== "talk") {
+      throw new InternalError("ObsError", "Mute media send is not supported for OpenChat");
+    }
     const oid = crypto.randomUUID();
     const { objId } = await this.uploadObjectForService({
       data,
@@ -584,12 +597,14 @@ export class LineObs {
         ver: "2.0",
         name: filename || `vyline.${ext}`,
       },
+      legacyMessaging: options.mute,
     });
 
     return await this.client.talk.sendMessage({
       to,
       contentType,
       contentMetadata: {
+        ...(options.mute ? { NOTIFICATION_DISABLED: "true" } : {}),
         SID: obsNamespace,
         OID: objId,
         FILE_SIZE: data.size.toString(),
@@ -617,6 +632,7 @@ export class LineObs {
     params?: Record<string, string | undefined>;
     filename?: string;
     addHeaders?: Record<string, string>;
+    legacyMessaging?: boolean;
     signal?: AbortSignal;
   }): Promise<{ objId: string; objHash: string; headers: Headers }> {
     this.client.log("Obs.uploadObjectForService", options);
@@ -646,6 +662,9 @@ export class LineObs {
 
     if (addHeaders) {
       headers = { ...headers, ...addHeaders };
+    }
+    if (options.legacyMessaging) {
+      headers = { ...headers, ...legacyMessagingHeaders(headers, this.prefix + obsPathFinal) };
     }
 
     const response = await this.client.fetch(this.prefix + obsPathFinal, {
@@ -721,6 +740,7 @@ export class LineObs {
     preview?: Blob;
     relatedMessageId?: string;
     messageRelationType?: "FORWARD" | "AUTO_REPLY" | "SUBORDINATE" | "REPLY";
+    mute?: boolean;
   }): Promise<Message> {
     const { data, oType, to, filename, preview, relatedMessageId, messageRelationType } = options;
     const typeSet: {
@@ -759,6 +779,7 @@ export class LineObs {
       oType: "file",
       obsPath: `${serviceName}/${obsNamespace}/${tempId}`,
       params,
+      legacyMessaging: options.mute,
     });
     if (oType === "image" || oType === "gif" || oType === "video") {
       let previewEdata: Blob;
@@ -777,6 +798,7 @@ export class LineObs {
         oType: "file",
         obsPath: `${serviceName}/${obsNamespace}/${objId}__ud-preview`,
         params,
+        legacyMessaging: options.mute,
       });
       if (objId !== objId2) {
         throw new InternalError(
@@ -821,6 +843,7 @@ export class LineObs {
       contentType: contentType,
       e2ee,
       contentMetadata: {
+        ...(options.mute ? { NOTIFICATION_DISABLED: "true" } : {}),
         SID: obsNamespace,
         OID: objId,
         FILE_SIZE: edata.size.toString(),
@@ -860,6 +883,7 @@ export class LineObs {
     previewSize?: number;
     relatedMessageId?: string;
     messageRelationType?: "FORWARD" | "AUTO_REPLY" | "SUBORDINATE" | "REPLY";
+    mute?: boolean;
     maxBytes?: number;
     signal?: AbortSignal;
   }): Promise<Message> {
@@ -941,6 +965,7 @@ export class LineObs {
         obsPath: `talk/${obsNamespace}/${tempId}`,
         params,
         signal,
+        legacyMessaging: options.mute,
       });
 
       if (oType === "image" || oType === "gif" || oType === "video") {
@@ -972,6 +997,7 @@ export class LineObs {
           obsPath: `talk/${obsNamespace}/${objId}__ud-preview`,
           params,
           signal,
+          legacyMessaging: options.mute,
         });
         if (objId !== previewObjId) {
           throw new InternalError(
@@ -989,6 +1015,7 @@ export class LineObs {
         contentType,
         e2ee: true,
         contentMetadata: {
+          ...(options.mute ? { NOTIFICATION_DISABLED: "true" } : {}),
           ...(options.durationMs != null && (oType === "audio" || oType === "video")
             ? { DURATION: String(options.durationMs) } : {}),
           SID: obsNamespace,

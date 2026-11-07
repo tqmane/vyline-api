@@ -15,8 +15,8 @@ export class TalkDomain {
     return sendText(this.client as VylineClient, to, text, e2ee);
   }
 
-  async unsend(messageId: string) {
-    await this.client.base.talk.unsendMessage({ messageId });
+  async unsend(messageId: string, options?: { legacy?: boolean }) {
+    await this.client.base.talk.unsendMessage({ messageId }, options);
   }
 
   async unsendSilently(messageId: string) {

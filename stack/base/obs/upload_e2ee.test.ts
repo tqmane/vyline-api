@@ -5,7 +5,7 @@ import { LineObs } from "./mod.ts";
 
 /** Per-call record of (data.size, obsPath) so tests can assert which
  *  blob was uploaded as the main object vs the preview. */
-type UploadRecord = { size: number; obsPath: string };
+type UploadRecord = { size: number; obsPath: string; legacyMessaging?: boolean };
 
 function fakeClient() {
   const e2eeCalls: { rawSize: number; keyMaterial?: string }[] = [];
@@ -49,8 +49,8 @@ function makeObs(): {
   const fake = fakeClient();
   const obs = new LineObs(fake.mock as never);
   // Intercept uploadObjectForService to record what was sent.
-  obs.uploadObjectForService = ((opts: { data: Blob; obsPath: string }) => {
-    fake.records.push({ size: opts.data.size, obsPath: opts.obsPath });
+  obs.uploadObjectForService = ((opts: { data: Blob; obsPath: string; legacyMessaging?: boolean }) => {
+    fake.records.push({ size: opts.data.size, obsPath: opts.obsPath, legacyMessaging: opts.legacyMessaging });
     return Promise.resolve({
       objId: "OBJ-1",
       headers: new Headers(),
@@ -73,7 +73,7 @@ test("uploadMediaByE2EE — without preview, legacy: full edata uploaded twice (
   assert(fake.records[1].obsPath.endsWith("__ud-preview"));
 });
 
-test("uploadMediaByE2EE — with preview, preview upload uses small blob (#103)", async () => {
+test.each([undefined, true])("uploadMediaByE2EE — previews preserve mute=%s", async (mute) => {
   const { obs, fake } = makeObs();
   const big = new Blob([new Uint8Array(100_000)]);
   const thumb = new Blob([new Uint8Array(2_000)]);
@@ -82,6 +82,7 @@ test("uploadMediaByE2EE — with preview, preview upload uses small blob (#103)"
     oType: "image",
     to: "u-recipient",
     preview: thumb,
+    mute,
   });
   assertEquals(fake.records.length, 2);
   // Main upload ≫ preview upload.
@@ -92,6 +93,9 @@ test("uploadMediaByE2EE — with preview, preview upload uses small blob (#103)"
   assertEquals(fake.e2eeCalls.length, 2);
   assertEquals(fake.e2eeCalls[0].keyMaterial, undefined);
   assertEquals(fake.e2eeCalls[1].keyMaterial, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+  assertEquals(fake.records.map((record) => record.legacyMessaging), [mute, mute]);
+  const sent = fake.sendMessageCalls[0] as { contentMetadata: Record<string, string> };
+  assertEquals(sent.contentMetadata.NOTIFICATION_DISABLED, mute ? "true" : undefined);
 });
 
 test("uploadMediaByE2EE — file type → no preview upload at all", async () => {

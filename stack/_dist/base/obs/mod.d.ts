@@ -98,7 +98,7 @@ export declare class LineObs {
         total: number;
         sequence: number;
         gid: string;
-    }): Promise<{
+    }, mute?: boolean): Promise<{
         objId: string;
         objHash: string;
         headers: Headers;
@@ -108,7 +108,7 @@ export declare class LineObs {
         data: Blob;
         filename?: string;
         durationMs?: number;
-    }>, signal?: AbortSignal): Promise<Array<{
+    }>, signal?: AbortSignal, mute?: boolean): Promise<Array<{
         objId: string;
         objHash: string;
         headers: Headers;
@@ -123,6 +123,7 @@ export declare class LineObs {
         durationMs?: number;
         relatedMessageId?: string;
         messageRelationType?: "FORWARD" | "AUTO_REPLY" | "SUBORDINATE" | "REPLY";
+        mute?: boolean;
     }): Promise<Message>;
     uploadObjectForService(options: {
         data: Blob;
@@ -131,6 +132,7 @@ export declare class LineObs {
         params?: Record<string, string | undefined>;
         filename?: string;
         addHeaders?: Record<string, string>;
+        legacyMessaging?: boolean;
         signal?: AbortSignal;
     }): Promise<{
         objId: string;
@@ -157,6 +159,7 @@ export declare class LineObs {
         preview?: Blob;
         relatedMessageId?: string;
         messageRelationType?: "FORWARD" | "AUTO_REPLY" | "SUBORDINATE" | "REPLY";
+        mute?: boolean;
     }): Promise<Message>;
     /**
      * File-backed E2EE upload for large media. Encryption is written beside the
@@ -175,6 +178,7 @@ export declare class LineObs {
         previewSize?: number;
         relatedMessageId?: string;
         messageRelationType?: "FORWARD" | "AUTO_REPLY" | "SUBORDINATE" | "REPLY";
+        mute?: boolean;
         maxBytes?: number;
         signal?: AbortSignal;
     }): Promise<Message>;

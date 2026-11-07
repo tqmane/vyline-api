@@ -53,7 +53,7 @@ function makeObs(gid = "628271567210283486") {
   return { obs, calls };
 }
 
-test("uploadObjTalkBatch — grouped images inherit server-issued GID", async () => {
+test.each([undefined, true])("uploadObjTalkBatch — grouping survives mute=%s", async (mute) => {
   const { obs, calls } = makeObs();
   const blobs = [
     new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" }),
@@ -64,6 +64,8 @@ test("uploadObjTalkBatch — grouped images inherit server-issued GID", async ()
   const result = await obs.uploadObjTalkBatch(
     "u-recipient",
     blobs.map((data, index) => ({ type: "image", data, filename: `${index + 1}.png` })),
+    undefined,
+    mute,
   );
 
   assertEquals(result.length, 3);
@@ -79,6 +81,41 @@ test("uploadObjTalkBatch — grouped images inherit server-issued GID", async ()
     assertEquals(meta.GTOTAL, "3");
     assertEquals(meta.GSEQ, String(index + 1));
     assertEquals(meta.GID, index === 0 ? "0" : "628271567210283486");
+    assertEquals(meta.NOTIFICATION_DISABLED, mute ? "true" : undefined);
+  }
+});
+
+test("uploadObjTalk — mute is encoded in X-Talk-Meta for single media only when requested", async () => {
+  const { obs, calls } = makeObs();
+  for (const mute of [undefined, false, true]) {
+    await obs.uploadObjTalk(
+      "u-recipient", "audio", new Blob(["audio"], { type: "audio/ogg" }),
+      undefined, "voice.ogg", 3750, 42, undefined, undefined, mute,
+    );
+    const call = calls.at(-1)!;
+    assertEquals(call.params?.duration, "3750");
+    assertEquals(call.addHeaders?.["Upload-Complete"], undefined);
+    if (mute) {
+      assertEquals(decodeTalkMeta(call.addHeaders?.["X-Talk-Meta"] ?? ""), {
+        NOTIFICATION_DISABLED: "true",
+      });
+    } else {
+      assertEquals(call.addHeaders?.["X-Talk-Meta"], undefined);
+    }
+  }
+});
+
+test("uploadObjTalkBatch — mute propagates to every ungrouped media item", async () => {
+  const { obs, calls } = makeObs();
+  await obs.uploadObjTalkBatch("c-recipient", [
+    { type: "image", data: new Blob(["image"], { type: "image/png" }) },
+    { type: "file", data: new Blob(["file"], { type: "text/plain" }) },
+  ], undefined, true);
+  assertEquals(calls.length, 2);
+  for (const call of calls) {
+    assertEquals(decodeTalkMeta(call.addHeaders?.["X-Talk-Meta"] ?? ""), {
+      NOTIFICATION_DISABLED: "true",
+    });
   }
 });
 
