@@ -1079,18 +1079,25 @@ export class E2EE {
   async encryptByKeyMaterial(
     rawData: Buffer,
     keyMaterial?: Buffer,
-  ): Promise<{ keyMaterial: string; encryptedData: Buffer }> {
+    isVideo = false,
+  ): Promise<{ keyMaterial: string; encryptedData: Buffer; videoHashes?: Buffer }> {
     // Encrypt file for E2EE Next
     if (!keyMaterial) {
       keyMaterial = crypto.randomBytes(32);
     }
     const keys = await this.deriveKeyMaterial(keyMaterial);
     const encData = await this.__encryptAESCTR(keys.encKey, keys.nonce, rawData);
-    const sign = this.signData(encData, keys.macKey);
+    const hashes: Buffer[] = [];
+    const videoHmac = isVideo
+      ? createVideoMediaHmac(keys.macKey, (hash) => hashes.push(hash))
+      : undefined;
+    videoHmac?.update(encData);
+    const sign = videoHmac?.digest() ?? this.signData(encData, keys.macKey);
 
     return {
       keyMaterial: keyMaterial.toString("base64"),
       encryptedData: Buffer.concat([encData, sign]),
+        ...(isVideo ? { videoHashes: Buffer.concat(hashes) } : {}),
     };
   }
 
