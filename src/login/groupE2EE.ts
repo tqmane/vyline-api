@@ -440,16 +440,8 @@ export function patchGroupKeyLookup(client: AnyClient): void {
         const prepared = await ensureGroupKeyById(client, mid, id);
         return prepared;
       }
-      // keyId 無し: 単一キャッシュのみ。無ければ last を取得。
+      // 送信は常に最新IDを確認する。単一キャッシュは履歴の by-id 取得でも上書きされる。
       // NOT_FOUND（共有鍵未作成）のときは送信経路向けに register する。
-      const legacy = await base.storage.get(`e2eeGroupKeys:${mid}`);
-      if (legacy && typeof legacy === "string") {
-        try {
-          return JSON.parse(legacy) as GroupKeyMaterial;
-        } catch {
-          /* fall through */
-        }
-      }
       try {
         const last = await base.talk.getLastE2EEGroupSharedKey({
           keyVersion: 2,
