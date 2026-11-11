@@ -63,9 +63,10 @@ export declare class E2EE {
         macKey: Buffer;
         nonce: Buffer;
     }>;
-    encryptByKeyMaterial(rawData: Buffer, keyMaterial?: Buffer): Promise<{
+    encryptByKeyMaterial(rawData: Buffer, keyMaterial?: Buffer, isVideo?: boolean): Promise<{
         keyMaterial: string;
         encryptedData: Buffer;
+        videoHashes?: Buffer;
     }>;
     decryptByKeyMaterial(rawData: Buffer, keyMaterial: Buffer | string, isVideo?: boolean): Promise<Buffer>;
     /**

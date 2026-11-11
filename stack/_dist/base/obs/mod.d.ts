@@ -41,6 +41,8 @@ export interface ObsMetadata {
 export interface E2eeMediaFileResult {
     path: string;
     size: number;
+    /** Ciphertext block hashes for the video's __ud-hash upload. */
+    videoHashes?: Buffer;
 }
 export interface DownloadedE2eeMediaFile extends E2eeMediaFileResult {
     fileName: string;
@@ -53,7 +55,7 @@ interface E2eeMediaKeys {
     nonce: Buffer;
 }
 /** Encrypt one media file with bounded buffers and append LINE's HMAC tag. */
-export declare function encryptE2eeMediaFile(sourcePath: string, targetPath: string, keys: E2eeMediaKeys, maxBytes?: number, signal?: AbortSignal): Promise<E2eeMediaFileResult>;
+export declare function encryptE2eeMediaFile(sourcePath: string, targetPath: string, keys: E2eeMediaKeys, maxBytes?: number, signal?: AbortSignal, isVideo?: boolean): Promise<E2eeMediaFileResult>;
 /**
  * Authenticate and decrypt an OBS response into an unpublished file. Only the
  * final 32-byte tag and the current network chunk are retained in memory.

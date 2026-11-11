@@ -52,6 +52,8 @@ export interface ObsMetadata {
 export interface E2eeMediaFileResult {
   path: string;
   size: number;
+  /** Ciphertext block hashes for the video's __ud-hash upload. */
+  videoHashes?: Buffer;
 }
 
 export interface DownloadedE2eeMediaFile extends E2eeMediaFileResult {
@@ -98,6 +100,7 @@ export async function encryptE2eeMediaFile(
   keys: E2eeMediaKeys,
   maxBytes = DEFAULT_MAX_E2EE_MEDIA_BYTES,
   signal?: AbortSignal,
+  isVideo = false,
 ): Promise<E2eeMediaFileResult> {
   assertMediaByteLimit(maxBytes);
   signal?.throwIfAborted();
@@ -111,7 +114,10 @@ export async function encryptE2eeMediaFile(
     throw new Error("media source size is invalid");
   }
   const cipher = crypto.createCipheriv("aes-256-ctr", keys.encKey, keys.nonce);
-  const hmac = crypto.createHmac("sha256", keys.macKey);
+  const hashes: Buffer[] = [];
+  const hmac = isVideo
+    ? createVideoMediaHmac(keys.macKey, (hash) => hashes.push(hash))
+    : crypto.createHmac("sha256", keys.macKey);
   let output: Awaited<ReturnType<typeof open>> | undefined;
   let inputBytes = 0;
   let outputBytes = 0;
@@ -148,7 +154,7 @@ export async function encryptE2eeMediaFile(
     outputBytes += tag.byteLength;
     await output.close();
     outputOpen = false;
-    return { path: targetPath, size: outputBytes };
+    return { path: targetPath, size: outputBytes, ...(isVideo ? { videoHashes: Buffer.concat(hashes) } : {}) };
   } catch (error) {
     if (outputOpen) await output?.close().catch(() => undefined);
     if (targetCreated) await rm(targetPath, { force: true }).catch(() => undefined);
@@ -770,7 +776,9 @@ export class LineObs {
       throw new InternalError("ObsError", "Invalid mid");
     }
     const rawData = Buffer.from(await data.arrayBuffer());
-    const { keyMaterial, encryptedData } = await this.client.e2ee.encryptByKeyMaterial(rawData);
+    const { keyMaterial, encryptedData, videoHashes } = await this.client.e2ee.encryptByKeyMaterial(
+      rawData, undefined, oType === "video",
+    );
     const tempId = "reqid-" + crypto.randomUUID();
     // @ts-expect-error: will fix cuz typescript version change
     const edata = new Blob([encryptedData]);
@@ -781,7 +789,7 @@ export class LineObs {
       params,
       legacyMessaging: options.mute,
     });
-    if (oType === "image" || oType === "gif" || oType === "video") {
+    if (oType === "image" || oType === "gif" || (oType === "video" && preview)) {
       let previewEdata: Blob;
       if (preview) {
         const enc = await this.client.e2ee.encryptByKeyMaterial(
@@ -809,6 +817,16 @@ export class LineObs {
           },
         );
       }
+    }
+
+    if (videoHashes) {
+      await this.uploadObjectForService({
+        data: new Blob([new Uint8Array(videoHashes)]),
+        oType: "file",
+        obsPath: `${serviceName}/${obsNamespace}/${objId}__ud-hash`,
+        filename: "hash",
+        legacyMessaging: options.mute,
+      });
     }
 
     // E2EE メディアは E2EE チャンクを作る。peer が E2EE 非対応の場合は plain として送る
@@ -846,7 +864,7 @@ export class LineObs {
         ...(options.mute ? { NOTIFICATION_DISABLED: "true" } : {}),
         SID: obsNamespace,
         OID: objId,
-        FILE_SIZE: edata.size.toString(),
+        FILE_SIZE: (oType === "video" ? data.size : edata.size).toString(),
         keyMaterial,
         fileName: filename || `line.${ext}`,
         ...(e2ee ? { e2eeVersion: "2" } : {}),
@@ -854,7 +872,7 @@ export class LineObs {
           ? {
               MEDIA_CONTENT_INFO: JSON.stringify({
                 category: "original",
-                fileSize: edata.size,
+                fileSize: oType === "video" ? data.size : edata.size,
                 extension: ext,
                 animated: oType == "gif",
               }),
@@ -954,7 +972,9 @@ export class LineObs {
     const encryptedPreviewPath = `${dataPath}.${crypto.randomUUID()}.e2ee-preview-partial`;
 
     try {
-      const encrypted = await encryptE2eeMediaFile(dataPath, encryptedPath, keys, maxBytes, signal);
+      const encrypted = await encryptE2eeMediaFile(
+        dataPath, encryptedPath, keys, maxBytes, signal, oType === "video",
+      );
       const encryptedBody = await openAsBlob(encrypted.path, {
         type: "application/octet-stream",
       });
@@ -968,7 +988,7 @@ export class LineObs {
         legacyMessaging: options.mute,
       });
 
-      if (oType === "image" || oType === "gif" || oType === "video") {
+      if (oType === "image" || oType === "gif" || (oType === "video" && previewPath)) {
         let previewBody: Blob = encryptedBody;
         if (previewPath) {
           const preview = await stat(previewPath);
@@ -1008,6 +1028,17 @@ export class LineObs {
         }
       }
 
+      if (encrypted.videoHashes) {
+        await this.uploadObjectForService({
+          data: new Blob([new Uint8Array(encrypted.videoHashes)]),
+          oType: "file",
+          obsPath: `talk/${obsNamespace}/${objId}__ud-hash`,
+          filename: "hash",
+          signal,
+          legacyMessaging: options.mute,
+        });
+      }
+
       signal?.throwIfAborted();
       return await this.client.talk.sendMessage({
         to,
@@ -1020,7 +1051,7 @@ export class LineObs {
             ? { DURATION: String(options.durationMs) } : {}),
           SID: obsNamespace,
           OID: objId,
-          FILE_SIZE: encrypted.size.toString(),
+          FILE_SIZE: (oType === "video" ? size : encrypted.size).toString(),
           keyMaterial,
           fileName: filename || `line.${ext}`,
           e2eeVersion: "2",
@@ -1028,7 +1059,7 @@ export class LineObs {
             ? {
                 MEDIA_CONTENT_INFO: JSON.stringify({
                   category: "original",
-                  fileSize: encrypted.size,
+                  fileSize: oType === "video" ? size : encrypted.size,
                   extension: ext,
                   animated: oType === "gif",
                 }),
