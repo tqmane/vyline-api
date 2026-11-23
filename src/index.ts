@@ -133,6 +133,7 @@ export {
   decryptLetterSealingMessage,
   prefetchDmPeerKeysForMessages,
   invalidatePeerPubCache,
+  invalidateSelfKeyCache,
   generateSharedSecret as letterSealingSharedSecret,
   generateAAD as letterSealingAAD,
   getSelfKeyByKeyId as letterSealingSelfKeyByKeyId,

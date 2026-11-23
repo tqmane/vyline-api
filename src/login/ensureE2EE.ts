@@ -43,7 +43,12 @@ function keyIdOf(key: { keyId?: number; 2?: number }): number {
 function keyDataOf(key: { keyData?: string | Uint8Array; 4?: string | Uint8Array }): Buffer {
   const data = key.keyData ?? key[4];
   if (data == null) return Buffer.alloc(0);
-  return typeof data === "string" ? Buffer.from(data) : Buffer.from(data);
+  if (typeof data === "string") {
+    const b64 = Buffer.from(data, "base64");
+    if (b64.length === 32 && b64.toString("base64") === data) return b64;
+    return Buffer.from(data);
+  }
+  return Buffer.from(data);
 }
 
 export interface E2EEIdentityStatus {
@@ -75,7 +80,7 @@ async function registerFreshSenderKey(base: BaseClient, mid: string): Promise<Lo
     publicKey: {
       version: 1,
       keyId: 0,
-      keyData: pubKey.toString("base64"),
+      keyData: pubKey as unknown as string,
       createdTime: Date.now(),
     },
   });
@@ -165,6 +170,9 @@ export async function ensureValidE2EEIdentity(
           localPub: String(local.pubKey).slice(0, 24),
           serverPub: serverPub.toString("base64").slice(0, 24),
         });
+        if (serverPub.length === 32) {
+          await base.storage.delete(`e2eeKeys:${keyId}`);
+        }
         continue;
       }
       const normalized: LocalKey = {

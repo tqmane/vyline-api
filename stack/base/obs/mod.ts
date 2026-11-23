@@ -996,7 +996,7 @@ export class LineObs {
             !preview.isFile() ||
             preview.size <= 0 ||
             preview.size !== previewSize ||
-            preview.size > Math.min(maxBytes, size)
+            preview.size > maxBytes
           ) {
             throw new Error("staged media preview size changed before E2EE upload");
           }
