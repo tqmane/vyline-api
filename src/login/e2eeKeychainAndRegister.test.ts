@@ -17,9 +17,13 @@ test("decodeE2EEKeyV1 stores every valid entry in encryptedKeyChain under its ow
   const latestKey = createKeyPair();
 
   const shared = generateSharedSecret(secretPair.privKey, serverPair.pubKey);
-  const aesKey = createHash("sha256").update(Buffer.concat([shared, Buffer.from("Key")])).digest();
+  const aesKey = createHash("sha256")
+    .update(Buffer.concat([shared, Buffer.from("Key")]))
+    .digest();
   const aesIv = xorHalves(
-    createHash("sha256").update(Buffer.concat([shared, Buffer.from("IV")])).digest(),
+    createHash("sha256")
+      .update(Buffer.concat([shared, Buffer.from("IV")]))
+      .digest(),
   );
   const cipher = createCipheriv("aes-256-cbc", aesKey, aesIv);
   cipher.setAutoPadding(false);
