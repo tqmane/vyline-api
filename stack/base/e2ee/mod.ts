@@ -278,79 +278,11 @@ export class E2EE {
     return Buffer.concat([cipher.update(plainData), cipher.final()]);
   }
 
-  public async decodeE2EEKeyV1(
-    data: LooseType,
-    secret: Buffer,
-  ): Promise<
-    | {
-        keyId: LooseType;
-        privKey: Buffer;
-        pubKey: Buffer;
-        e2eeVersion: LooseType;
-      }
-    | undefined
-  > {
-    if (data.encryptedKeyChain) {
-      const encryptedKeyChain = Buffer.from(data.encryptedKeyChain, "base64");
-      const keyId = data.keyId;
-      const publicKey = Buffer.from(data.publicKey, "base64");
-      const e2eeVersion = data.e2eeVersion;
-      const [privKey, pubKey] = this.decryptKeyChain(publicKey, secret, encryptedKeyChain);
-      this.e2eeLog("decodeE2EEKeyV1E2EEKeyInfo", {
-        e2eeKey: {
-          keyId,
-          privKey,
-          pubKey,
-          e2eeVersion,
-        },
-      });
-      const derivedPub = Buffer.from(nacl.scalarMult.base(new Uint8Array(privKey)));
-      if (!derivedPub.equals(pubKey)) {
-        this.e2eeLog("decodeE2EEKeyV1KeyMismatch", {
-          keyId,
-          derivedPub: derivedPub.toString("base64"),
-          chainPub: pubKey.toString("base64"),
-        });
-        this.client.emit("e2ee:keyMismatch" as LooseType, {
-          keyId,
-          reason: "privKey does not derive to pubKey in chain",
-        });
-        return undefined;
-      }
-      const verified = await this.verifyStoredKeyAgainstServer(keyId, privKey);
-      if (!verified) {
-        this.e2eeLog("decodeE2EEKeyV1ServerKeyMismatch", {
-          keyId,
-          derivedPub: derivedPub.toString("base64"),
-        });
-        this.client.emit("e2ee:keyMismatch" as LooseType, {
-          keyId,
-          reason: "privKey does not match server-registered pubKey",
-        });
-        return undefined;
-      }
-      await this.client.storage.set(
-        "e2eeKeys:" + keyId,
-        JSON.stringify({
-          keyId,
-          privKey: privKey.toString("base64"),
-          pubKey: pubKey.toString("base64"),
-          e2eeVersion,
-        }),
-      );
-      return {
-        keyId,
-        privKey,
-        pubKey,
-        e2eeVersion,
-      };
-    }
-  }
-  public decryptKeyChain(
+  private decryptKeyChainEntries(
     publicKey: Buffer,
     privateKey: Buffer,
     encryptedKeyChain: Buffer,
-  ): Buffer[] {
+  ): Array<{ keyId?: number | string; privKey: Buffer; pubKey: Buffer }> {
     this.e2eeLog("decryptKeyChainKeyInfo", {
       decryptKeyChain: {
         publicKey: publicKey.toString("base64"),
@@ -367,10 +299,122 @@ export class E2EE {
     this.e2eeLog("decryptKeyChainBinKeyInfo", {
       binkey: keychainData.toString("hex"),
     });
-    const key = this.client.thrift.readThriftStruct(keychainData)[1];
-    const publicKeyBytes = Buffer.from(key[0][4]);
-    const privateKeyBytes = Buffer.from(key[0][5]);
-    return [privateKeyBytes, publicKeyBytes];
+    const rawEntries = (this.client.thrift.readThriftStruct(keychainData)[1] ?? []) as Array<
+      Record<number, unknown>
+    >;
+    const entries: Array<{ keyId?: number | string; privKey: Buffer; pubKey: Buffer }> = [];
+    for (const raw of rawEntries) {
+      if (!raw?.[4] || !raw?.[5]) continue;
+      entries.push({
+        ...(raw[2] != null ? { keyId: raw[2] as number | string } : {}),
+        pubKey: Buffer.from(raw[4] as Uint8Array),
+        privKey: Buffer.from(raw[5] as Uint8Array),
+      });
+    }
+    return entries;
+  }
+
+  public async decodeE2EEKeyV1(
+    data: LooseType,
+    secret: Buffer,
+  ): Promise<
+    | {
+        keyId: LooseType;
+        privKey: Buffer;
+        pubKey: Buffer;
+        e2eeVersion: LooseType;
+      }
+    | undefined
+  > {
+    if (data?.encryptedKeyChain) {
+      const encryptedKeyChain = Buffer.from(data.encryptedKeyChain, "base64");
+      const metadataKeyId = data.keyId;
+      const publicKey = Buffer.from(data.publicKey, "base64");
+      const e2eeVersion = data.e2eeVersion;
+      const entries = this.decryptKeyChainEntries(publicKey, secret, encryptedKeyChain);
+      let preferred:
+        | { keyId: LooseType; privKey: Buffer; pubKey: Buffer; e2eeVersion: LooseType }
+        | undefined;
+      let latestValid:
+        | { keyId: LooseType; privKey: Buffer; pubKey: Buffer; e2eeVersion: LooseType }
+        | undefined;
+
+      for (let idx = 0; idx < entries.length; idx++) {
+        const entry = entries[idx]!;
+        const entryKeyId = entry.keyId ?? (entries.length === 1 ? metadataKeyId : undefined);
+        const derivedPub = Buffer.from(nacl.scalarMult.base(new Uint8Array(entry.privKey)));
+        if (!derivedPub.equals(entry.pubKey)) {
+          this.e2eeLog("decodeE2EEKeyV1KeyMismatch", {
+            keyId: entryKeyId ?? idx,
+            derivedPub: derivedPub.toString("base64"),
+            chainPub: entry.pubKey.toString("base64"),
+          });
+          this.client.emit("e2ee:keyMismatch" as LooseType, {
+            keyId: entryKeyId ?? idx,
+            reason: "privKey does not derive to pubKey in chain",
+          });
+          continue;
+        }
+        if (entryKeyId == null) continue;
+        // Pre-auth QR/email flows do not have an authToken yet; verifying
+        // against getE2EEPublicKeys before login always throws and masks errors.
+        if (this.client.authToken) {
+          const verified = await this.verifyStoredKeyAgainstServer(entryKeyId, entry.privKey);
+          if (!verified) {
+            this.e2eeLog("decodeE2EEKeyV1ServerKeyMismatch", {
+              keyId: entryKeyId,
+              derivedPub: derivedPub.toString("base64"),
+            });
+            this.client.emit("e2ee:keyMismatch" as LooseType, {
+              keyId: entryKeyId,
+              reason: "privKey does not match server-registered pubKey",
+            });
+            continue;
+          }
+        }
+        await this.client.storage.set(
+          "e2eeKeys:" + entryKeyId,
+          JSON.stringify({
+            keyId: entryKeyId,
+            privKey: entry.privKey.toString("base64"),
+            pubKey: entry.pubKey.toString("base64"),
+            e2eeVersion,
+          }),
+        );
+        const item = {
+          keyId: entryKeyId,
+          privKey: entry.privKey,
+          pubKey: entry.pubKey,
+          e2eeVersion,
+        };
+        latestValid = item;
+        if (String(entryKeyId) === String(metadataKeyId)) {
+          preferred = item;
+        }
+      }
+
+      const selected = preferred ?? latestValid;
+      if (selected) {
+        this.e2eeLog("decodeE2EEKeyV1E2EEKeyInfo", {
+          e2eeKey: selected,
+          totalEntries: entries.length,
+        });
+        return selected;
+      }
+      return undefined;
+    }
+  }
+  public decryptKeyChain(
+    publicKey: Buffer,
+    privateKey: Buffer,
+    encryptedKeyChain: Buffer,
+  ): Buffer[] {
+    const entries = this.decryptKeyChainEntries(publicKey, privateKey, encryptedKeyChain);
+    const chosen = entries[entries.length - 1];
+    if (!chosen) {
+      throw new InternalError("DecodeE2EEKeyError", "encryptedKeyChain had no key entries");
+    }
+    return [chosen.privKey, chosen.pubKey];
   }
 
   public encryptDeviceSecret(
@@ -920,7 +964,7 @@ export class E2EE {
         publicKey: {
           version: 1,
           keyId: 0,
-          keyData: pubKey.toString("base64"),
+          keyData: pubKey as unknown as string,
           createdTime: 0,
         },
       });

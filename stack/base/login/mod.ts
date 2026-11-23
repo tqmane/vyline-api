@@ -271,7 +271,18 @@ export class Login {
       // E2EE info historically arrived in field 10 on the non-
       // ForSecure response, and in metaData["e2eeInfo"] on
       // ForSecure.  Try both.
-      const e2eeInfo = response[10] ?? metaData?.["e2eeInfo"];
+      const rawE2eeInfo =
+        response[10] ??
+        metaData?.["e2eeInfo"] ??
+        (metaData?.["encryptedKeyChain"] ? metaData : undefined);
+      let e2eeInfo: LooseType = rawE2eeInfo;
+      if (typeof rawE2eeInfo === "string") {
+        try {
+          e2eeInfo = JSON.parse(rawE2eeInfo);
+        } catch {
+          e2eeInfo = undefined;
+        }
+      }
       let e2eeKeyResult: LooseType = undefined;
       if (e2eeInfo) {
         e2eeKeyResult = await this.client.e2ee.decodeE2EEKeyV1(e2eeInfo, Buffer.from(secret));

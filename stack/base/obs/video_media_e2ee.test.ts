@@ -194,3 +194,54 @@ test("corrupted video ciphertext and tags are rejected without publishing a file
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("staged short video with larger JPEG preview uploads __ud-preview and DURATION", async () => {
+  const f = await fixture(256);
+  const preview = Buffer.alloc(1024, 0xff);
+  const uploads: Array<{ obsPath: string; size: number }> = [];
+  let sentMeta: Record<string, string> = {};
+  const obs = new LineObs({
+    e2ee: {
+      deriveKeyMaterial: f.e2ee.deriveKeyMaterial.bind(f.e2ee),
+      encryptByKeyMaterial: f.e2ee.encryptByKeyMaterial.bind(f.e2ee),
+      encryptE2EEMessage: async () => [Buffer.from("synthetic envelope")],
+    },
+    talk: {
+      sendMessage: async (message: { contentMetadata: Record<string, string> }) => {
+        sentMeta = message.contentMetadata;
+        return { ...message, id: "short-video-msg" };
+      },
+    },
+  } as never);
+  obs.uploadObjectForService = (async (upload: { data: Blob; obsPath: string }) => {
+    uploads.push({ obsPath: upload.obsPath, size: upload.data.size });
+    return { objId: "short-obj", headers: new Headers() };
+  }) as never;
+
+  const root = await mkdtemp(join(tmpdir(), "vyline-short-video-"));
+  try {
+    const source = join(root, "short.mp4");
+    const poster = join(root, "thumb.jpg");
+    await writeFile(source, f.plain);
+    await writeFile(poster, preview);
+    await obs.uploadMediaByE2EEFromFile({
+      dataPath: source,
+      size: f.plain.length,
+      mimeType: "video/mp4",
+      oType: "video",
+      to: "u-synthetic",
+      filename: "short.mp4",
+      durationMs: 2500,
+      previewPath: poster,
+      previewSize: preview.length,
+    });
+    expect(uploads.map((u) => u.obsPath)).toEqual([
+      expect.stringContaining("talk/emv/reqid-"),
+      "talk/emv/short-obj__ud-preview",
+      "talk/emv/short-obj__ud-hash",
+    ]);
+    expect(sentMeta.DURATION).toBe("2500");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

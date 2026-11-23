@@ -22,6 +22,7 @@ export declare class E2EE {
     xor(buf: Buffer): Buffer;
     getSHA256Sum(...args: (string | Buffer)[]): Buffer;
     encryptAESECB(aesKey: Buffer, plainData: Buffer): Buffer;
+    private decryptKeyChainEntries;
     decodeE2EEKeyV1(data: LooseType, secret: Buffer): Promise<{
         keyId: LooseType;
         privKey: Buffer;

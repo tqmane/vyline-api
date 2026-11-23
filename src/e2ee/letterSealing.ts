@@ -129,6 +129,13 @@ function aesGcmDecrypt(message: Buffer, gcmKey: Buffer, nonce: Buffer, aad: Buff
 
 // ─── 自己鍵の解決 ────────────────────────────────────────────────
 
+export function invalidateSelfKeyCache(client: AnyClient, keyId?: number): void {
+  const mem = selfKeyMemByClient.get(asBase(client));
+  if (!mem) return;
+  if (keyId === undefined) mem.clear();
+  else mem.delete(keyId);
+}
+
 export async function getSelfKeyByKeyId(
   client: AnyClient,
   keyId: number,
@@ -139,16 +146,11 @@ export async function getSelfKeyByKeyId(
     mem = new Map();
     selfKeyMemByClient.set(base, mem);
   }
-  if (mem.has(keyId)) {
-    const hit = mem.get(keyId);
-    return hit ?? null;
-  }
+  const hit = mem.get(keyId);
+  if (hit) return hit;
 
   const raw = await base.storage.get(`e2eeKeys:${keyId}`);
-  if (!raw || typeof raw !== "string") {
-    mem.set(keyId, null);
-    return null;
-  }
+  if (!raw || typeof raw !== "string") return null;
   try {
     const parsed = JSON.parse(raw) as SelfKeyData;
     if (parsed?.privKey) {
@@ -159,7 +161,6 @@ export async function getSelfKeyByKeyId(
   } catch {
     /* ignore corrupt cache */
   }
-  mem.set(keyId, null);
   return null;
 }
 
